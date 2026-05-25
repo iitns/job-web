@@ -40,8 +40,11 @@ DEFAULT_PAGE_SIZE = 12
 MAX_PAGE_SIZE = 50
 ALLOWED_RESUME_EXTENSIONS = {".docx"}
 
-RESUME_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS resumes (
+RESUME_TABLE = "job_web_resumes"
+RESUME_PROFILE_TABLE = "job_web_resume_profiles"
+
+RESUME_SCHEMA_SQL = f"""
+CREATE TABLE IF NOT EXISTS {RESUME_TABLE} (
     id BIGSERIAL PRIMARY KEY,
     filename TEXT NOT NULL,
     content_type TEXT,
@@ -57,8 +60,8 @@ CREATE TABLE IF NOT EXISTS resumes (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS resume_profiles (
-    resume_id BIGINT PRIMARY KEY REFERENCES resumes(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS {RESUME_PROFILE_TABLE} (
+    resume_id BIGINT PRIMARY KEY REFERENCES {RESUME_TABLE}(id) ON DELETE CASCADE,
     candidate_name TEXT,
     summary TEXT,
     years_of_experience NUMERIC(4,1),
@@ -83,7 +86,7 @@ CREATE TABLE IF NOT EXISTS resume_profiles (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_resumes_created_at ON resumes(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_job_web_resumes_created_at ON {RESUME_TABLE}(created_at DESC);
 """
 
 
@@ -554,7 +557,7 @@ def insert_resume_record(*, filename: str, content_type: str | None, storage_pat
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO resumes (filename, content_type, storage_path, file_size_bytes, status)
+                INSERT INTO job_web_resumes (filename, content_type, storage_path, file_size_bytes, status)
                 VALUES (%s, %s, %s, %s, 'uploaded')
                 RETURNING id
                 """,
@@ -570,7 +573,7 @@ def update_resume_text(*, resume_id: int, raw_text: str) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE resumes
+                UPDATE job_web_resumes
                 SET raw_text = %s,
                     status = 'text_extracted',
                     updated_at = NOW()
@@ -586,7 +589,7 @@ def update_resume_failure(*, resume_id: int, message: str) -> None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE resumes
+                UPDATE job_web_resumes
                 SET status = 'failed',
                     extract_error = %s,
                     updated_at = NOW()
@@ -603,7 +606,7 @@ def upsert_resume_profile(*, resume_id: int, profile: dict[str, Any], metadata: 
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO resume_profiles (
+                INSERT INTO job_web_resume_profiles (
                     resume_id, candidate_name, summary, years_of_experience, current_title,
                     seniority, locations, skills, domains, companies, roles,
                     preferred_job_titles, preferred_locations, team_keywords,
@@ -666,7 +669,7 @@ def upsert_resume_profile(*, resume_id: int, profile: dict[str, Any], metadata: 
             )
             cur.execute(
                 """
-                UPDATE resumes
+                UPDATE job_web_resumes
                 SET status = 'normalized',
                     llm_model = %s,
                     normalization_method = %s,
@@ -705,7 +708,7 @@ def fetch_resume_and_profile(*, resume_id: int | None = None, latest: bool = Fal
                     r.normalized_at,
                     r.created_at,
                     r.updated_at
-                FROM resumes r
+                FROM job_web_resumes r
                 WHERE {clause}
                 ORDER BY r.created_at DESC
                 LIMIT 1
@@ -720,7 +723,7 @@ def fetch_resume_and_profile(*, resume_id: int | None = None, latest: bool = Fal
             cur.execute(
                 """
                 SELECT *
-                FROM resume_profiles
+                FROM job_web_resume_profiles
                 WHERE resume_id = %s
                 """,
                 (resume["id"],),
@@ -894,7 +897,7 @@ def delete_resume(resume_id: int):
     storage_path = Path(resume["storage_path"])
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM resumes WHERE id = %s", (resume_id,))
+            cur.execute("DELETE FROM job_web_resumes WHERE id = %s", (resume_id,))
         conn.commit()
 
     try:
