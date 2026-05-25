@@ -59,10 +59,10 @@ jobs:
           token: ${{ secrets.K8S_MANIFESTS_PAT }}
           path: k8s-manifests
 
-      - name: Update oracle-job-web image tag
+      - name: Update job-web image tag
         run: |
           sed -i "s|image: ghcr.io/iitns/job-web:.*|image: ghcr.io/iitns/job-web:${{ github.sha }}|" \
-            k8s-manifests/apps/oracle-job-web/deployment.yaml
+            k8s-manifests/apps/job-web/deployment.yaml
           cd k8s-manifests
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
