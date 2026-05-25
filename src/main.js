@@ -61,8 +61,19 @@ function formatYears(value) {
   return `${value}년`
 }
 
+function renderInlineChips(items, emptyLabel = '정보 없음') {
+  const normalized = normalizeList(items).slice(0, 6)
+  if (!normalized.length) {
+    return `<span class="inline-chip muted">${escapeHtml(emptyLabel)}</span>`
+  }
+
+  return normalized
+    .map((item) => `<span class="inline-chip">${escapeHtml(item)}</span>`)
+    .join('')
+}
+
 function jobSummary(job) {
-  return job.team_description || job.raw_description || job.responsibilities || '상세 설명이 아직 없습니다.'
+  return job.summary || job.team_description || job.raw_description || job.responsibilities || '상세 설명이 아직 없습니다.'
 }
 
 function qualificationItems(job) {
@@ -239,13 +250,41 @@ function renderJobs() {
         .map(
           (job) => `
             <button class="job-card ${state.selectedJobId === job.job_id ? 'selected' : ''}" type="button" data-job-id="${escapeHtml(job.job_id)}">
-              <div class="job-card-header">
-                <span class="company-pill">${escapeHtml(job.company)}</span>
-                <span class="posted-at">${formatDate(job.posted_at)}</span>
+              <div class="job-card-topline">
+                <div class="company-lockup">
+                  ${
+                    job.company_logo_url
+                      ? `<img class="company-logo" src="${escapeHtml(job.company_logo_url)}" alt="${escapeHtml(job.company)} 로고" loading="lazy" />`
+                      : `<span class="company-logo fallback">${escapeHtml(job.company_mark || '?')}</span>`
+                  }
+                  <div class="job-card-titleblock">
+                    <div class="job-card-meta">
+                      <span class="job-meta-strong">${escapeHtml(job.company)}</span>
+                      <span class="job-meta-divider">·</span>
+                      <span>${escapeHtml(job.title)}</span>
+                      <span class="job-meta-divider">·</span>
+                      <span>${escapeHtml(job.display_team || '팀 정보 없음')}</span>
+                      <span class="job-meta-divider">·</span>
+                      <span>${escapeHtml(job.primary_location || '지역 미정')}</span>
+                      <span class="job-meta-divider">·</span>
+                      <span>${formatDate(job.posted_at)}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <h3>${escapeHtml(job.title)}</h3>
-              <p class="job-team">${escapeHtml(job.team || job.level_guess || '팀 정보 없음')}</p>
-              <p class="job-description">${escapeHtml(jobSummary(job))}</p>
+              <p class="job-summary">${escapeHtml(jobSummary(job))}</p>
+              <div class="job-chip-row">
+                <span class="job-chip-label">Skills</span>
+                <div class="inline-chip-list">
+                  ${renderInlineChips(job.skills, '스킬 없음')}
+                </div>
+              </div>
+              <div class="job-chip-row">
+                <span class="job-chip-label">Domains</span>
+                <div class="inline-chip-list">
+                  ${renderInlineChips(job.domains, '도메인 없음')}
+                </div>
+              </div>
             </button>
           `,
         )

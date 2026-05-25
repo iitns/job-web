@@ -71,17 +71,47 @@ def ensure_runtime_state() -> None:
         conn.commit()
 
 
+def summarize_text(*parts: Any, limit: int = 220) -> str | None:
+    text = " ".join(str(part or "").strip() for part in parts if str(part or "").strip())
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1].rstrip()}…"
+
+
+def company_mark(company: str | None) -> str:
+    words = [chunk for chunk in re.split(r"[^A-Za-z0-9]+", str(company or "").strip()) if chunk]
+    if not words:
+        return "?"
+    if len(words) == 1:
+        return words[0][:2].upper()
+    return f"{words[0][0]}{words[1][0]}".upper()
+
+
 def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
+    summary = summarize_text(
+        row.get("summary"),
+        row.get("team_description"),
+        row.get("responsibilities"),
+        row.get("raw_description"),
+    )
     return {
         "job_id": row.get("job_id"),
         "company": row.get("company"),
+        "company_mark": company_mark(row.get("company")),
+        "company_logo_url": row.get("company_logo_url") or row.get("logo_url"),
         "title": row.get("title"),
         "location": row.get("location"),
         "locations": row.get("locations") or [],
+        "primary_location": row.get("location") or ", ".join(row.get("locations") or []),
         "level_guess": row.get("level_guess"),
         "team": row.get("team"),
+        "display_team": row.get("team") or row.get("level_guess"),
         "raw_description": row.get("raw_description"),
         "team_description": row.get("team_description"),
+        "summary": summary,
         "responsibilities": row.get("responsibilities"),
         "minimum_qualifications": row.get("minimum_qualifications"),
         "preferred_qualifications": row.get("preferred_qualifications"),

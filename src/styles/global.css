@@ -450,35 +450,101 @@ button {
   box-shadow: 0 12px 30px rgba(28, 108, 75, 0.12);
 }
 
-.job-card-header {
+.job-card-topline {
   display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: center;
+  align-items: start;
 }
 
-.company-pill {
+.company-lockup {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.company-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  object-fit: cover;
+  flex: 0 0 auto;
+  border: 1px solid rgba(19, 38, 31, 0.08);
+  background: white;
+}
+
+.company-logo.fallback {
   display: inline-flex;
   align-items: center;
-  border-radius: 999px;
-  padding: 6px 12px;
-  background: rgba(216, 244, 107, 0.52);
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(216, 244, 107, 0.8), rgba(28, 108, 75, 0.22));
+  color: #1b4134;
   font-size: 0.88rem;
   font-weight: 700;
 }
 
-.job-card h3 {
-  margin: 14px 0 8px;
-  font-size: 1.3rem;
+.job-card-titleblock {
+  min-width: 0;
+  flex: 1;
 }
 
-.job-team {
-  margin: 0 0 6px;
+.job-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  color: #244739;
+  line-height: 1.5;
+}
+
+.job-meta-strong {
+  font-weight: 800;
+}
+
+.job-meta-divider {
+  color: rgba(36, 71, 57, 0.45);
+}
+
+.job-summary {
+  margin: 16px 0 0;
+  color: var(--text-subtle);
+}
+
+.job-chip-row {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.job-chip-label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--primary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.inline-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.inline-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 7px 11px;
+  background: rgba(216, 244, 107, 0.28);
+  color: #244739;
+  font-size: 0.86rem;
   font-weight: 700;
 }
 
-.job-description {
-  margin: 0;
+.inline-chip.muted {
+  background: rgba(19, 38, 31, 0.06);
+  color: var(--text-subtle);
 }
 
 .results-state {
@@ -621,6 +687,11 @@ button {
 
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .job-chip-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
   }
 
   .resume-meta-grid,
