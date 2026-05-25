@@ -1,5 +1,94 @@
+const MOBILE_VIEWPORT_QUERY = window.matchMedia('(max-width: 980px)')
+
+const TAB_LABELS = {
+  search: '목록',
+  recommend: '추천',
+  update: '이력서 업데이트',
+}
+
+const LOCATION_ABBREVIATIONS = {
+  alabama: 'AL',
+  alaska: 'AK',
+  arizona: 'AZ',
+  arkansas: 'AR',
+  california: 'CA',
+  colorado: 'CO',
+  connecticut: 'CT',
+  delaware: 'DE',
+  florida: 'FL',
+  georgia: 'GA',
+  hawaii: 'HI',
+  idaho: 'ID',
+  illinois: 'IL',
+  indiana: 'IN',
+  iowa: 'IA',
+  kansas: 'KS',
+  kentucky: 'KY',
+  louisiana: 'LA',
+  maine: 'ME',
+  maryland: 'MD',
+  massachusetts: 'MA',
+  michigan: 'MI',
+  minnesota: 'MN',
+  mississippi: 'MS',
+  missouri: 'MO',
+  montana: 'MT',
+  nebraska: 'NE',
+  nevada: 'NV',
+  'new hampshire': 'NH',
+  'new jersey': 'NJ',
+  'new mexico': 'NM',
+  'new york': 'NY',
+  'north carolina': 'NC',
+  'north dakota': 'ND',
+  ohio: 'OH',
+  oklahoma: 'OK',
+  oregon: 'OR',
+  pennsylvania: 'PA',
+  'rhode island': 'RI',
+  'south carolina': 'SC',
+  'south dakota': 'SD',
+  tennessee: 'TN',
+  texas: 'TX',
+  utah: 'UT',
+  vermont: 'VT',
+  virginia: 'VA',
+  washington: 'WA',
+  'west virginia': 'WV',
+  wisconsin: 'WI',
+  wyoming: 'WY',
+  'district of columbia': 'DC',
+  'united states': 'US',
+  usa: 'US',
+  korea: 'KR',
+  'south korea': 'KR',
+  'republic of korea': 'KR',
+  japan: 'JP',
+  singapore: 'SG',
+  taiwan: 'TW',
+  germany: 'DE',
+  canada: 'CA',
+  australia: 'AU',
+  india: 'IN',
+  ireland: 'IE',
+  'united kingdom': 'UK',
+  uk: 'UK',
+  france: 'FR',
+  spain: 'ES',
+  netherlands: 'NL',
+  poland: 'PL',
+}
+
+function availableTabs(isMobile = MOBILE_VIEWPORT_QUERY.matches) {
+  return isMobile ? ['search', 'recommend'] : ['search', 'recommend', 'update']
+}
+
+function normalizeTab(tab, isMobile = MOBILE_VIEWPORT_QUERY.matches) {
+  return availableTabs(isMobile).includes(tab) ? tab : 'search'
+}
+
 const state = {
-  activeTab: window.localStorage.getItem('job-web:active-tab') || 'search',
+  activeTab: normalizeTab(window.localStorage.getItem('job-web:active-tab') || 'search'),
   draftKeyword: '',
   searchKeyword: '',
   selectedCompanies: [],
@@ -21,7 +110,11 @@ const state = {
   resumeUploading: false,
   resumeError: '',
   resumeSuccess: '',
+  isMobile: MOBILE_VIEWPORT_QUERY.matches,
+  mobileMenuOpen: false,
 }
+
+window.localStorage.setItem('job-web:active-tab', state.activeTab)
 
 const root = document.querySelector('#root')
 
@@ -35,10 +128,77 @@ function escapeHtml(value) {
 }
 
 function formatDate(value) {
-  if (!value) {
+  const date = value ? new Date(value) : null
+  if (!date || Number.isNaN(date.getTime())) {
     return '미정'
   }
-  return new Date(value).toLocaleDateString('ko-KR')
+  return date.toLocaleDateString('ko-KR')
+}
+
+function formatCardDate(value) {
+  const date = value ? new Date(value) : null
+  if (!date || Number.isNaN(date.getTime())) {
+    return '미정'
+  }
+
+  const year = String(date.getFullYear()).slice(-2)
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  const currentYear = new Date().getFullYear()
+
+  return date.getFullYear() === currentYear ? `${month}.${day}` : `${year}.${month}.${day}`
+}
+
+function normalizeLocationKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replaceAll('.', '')
+}
+
+function compactLocation(value) {
+  const input = String(value || '').trim()
+  if (!input) {
+    return '미정'
+  }
+
+  const normalizedInput = normalizeLocationKey(input)
+  if (normalizedInput.includes('remote')) {
+    return 'Remote'
+  }
+  if (normalizedInput.includes('hybrid')) {
+    return 'Hybrid'
+  }
+
+  const tokens = input
+    .split(/[\\/|]/)
+    .flatMap((part) => part.split(','))
+    .map((part) => part.trim())
+    .filter(Boolean)
+
+  const prioritizedTokens = tokens.length > 1 ? [...tokens.slice(0, -1)].reverse().concat(tokens[tokens.length - 1]) : tokens
+
+  for (const token of prioritizedTokens) {
+    const key = normalizeLocationKey(token)
+    if (LOCATION_ABBREVIATIONS[key]) {
+      return LOCATION_ABBREVIATIONS[key]
+    }
+
+    if (/^[A-Z]{2,4}$/.test(token)) {
+      return token
+    }
+  }
+
+  const fallback = tokens[tokens.length - 1] || input
+  const words = fallback.split(/\s+/).filter(Boolean)
+  if (words.length > 1 && words.length <= 3) {
+    const initials = words.map((word) => word[0]).join('').toUpperCase()
+    if (initials.length <= 4) {
+      return initials
+    }
+  }
+
+  return fallback.length > 12 ? `${fallback.slice(0, 11)}…` : fallback
 }
 
 function splitTextLines(value) {
@@ -137,6 +297,15 @@ async function loadLatestResume() {
 
 async function loadJobs() {
   if (state.activeTab === 'update') {
+    render()
+    return
+  }
+
+  if (state.activeTab === 'recommend' && !state.resumeProfile) {
+    state.jobs = []
+    state.total = 0
+    state.error = ''
+    state.loading = false
     render()
     return
   }
@@ -250,6 +419,10 @@ function renderCompanyOptions() {
 }
 
 function renderJobs() {
+  if (state.activeTab === 'recommend' && !state.resumeProfile) {
+    return `<div class="results-state">${state.isMobile ? '추천은 데스크탑에서 최신 이력서를 등록한 뒤 사용할 수 있습니다.' : '추천을 사용하려면 최신 이력서를 먼저 등록해 주세요.'}</div>`
+  }
+
   if (state.loading) {
     return '<div class="results-state">공고를 불러오는 중입니다.</div>'
   }
@@ -272,24 +445,24 @@ function renderJobs() {
                       : `<span class="company-logo fallback">${escapeHtml(job.company_mark || '?')}</span>`
                   }
                   <div class="job-card-titleblock">
-                    <div class="job-card-meta">
-                      <span class="job-meta-strong">${escapeHtml(job.company)}</span>
-                      <span class="job-meta-divider">·</span>
-                      <span>${escapeHtml(job.title)}</span>
-                      <span class="job-meta-divider">·</span>
-                      <span>${escapeHtml(job.display_team || '팀 정보 없음')}</span>
-                      <span class="job-meta-divider">·</span>
-                      <span>${escapeHtml(job.primary_location || '지역 미정')}</span>
-                      <span class="job-meta-divider">·</span>
-                      <span>${formatDate(job.posted_at)}</span>
+                    <div class="job-card-titleline">
+                      <span class="job-company">${escapeHtml(job.company)}</span>
+                      <span class="job-title">${escapeHtml(job.title)}</span>
                     </div>
                   </div>
                 </div>
-                ${
-                  job.recommendation_score
-                    ? `<span class="recommendation-badge">${escapeHtml(job.recommendation_score)}</span>`
-                    : ''
-                }
+                <div class="job-card-sidegroup">
+                  <div class="job-card-side-meta">
+                    <span>${escapeHtml(compactLocation(job.primary_location))}</span>
+                    <span class="job-meta-divider">·</span>
+                    <span>${formatCardDate(job.posted_at)}</span>
+                  </div>
+                  ${
+                    job.recommendation_score
+                      ? `<span class="recommendation-badge">${escapeHtml(job.recommendation_score)}</span>`
+                      : ''
+                  }
+                </div>
               </div>
               <p class="job-summary">${escapeHtml(jobSummary(job))}</p>
               ${
@@ -511,18 +684,29 @@ function renderResumePanel() {
 }
 
 function renderNavigation() {
-  const items = [
-    ['search', '검색'],
-    ['recommend', '추천'],
-    ['update', '이력서 업데이트'],
-  ]
+  const items = availableTabs(state.isMobile).map((id) => [id, TAB_LABELS[id]])
+
+  if (state.isMobile) {
+    return `
+      <nav class="top-nav panel mobile-nav">
+        <div class="nav-mobile-copy">
+          <span class="nav-wordmark">JOB WEB</span>
+          <span class="nav-current-tab">${TAB_LABELS[state.activeTab] || TAB_LABELS.search}</span>
+        </div>
+        <button class="icon-button nav-menu-button" type="button" aria-label="메뉴 열기" data-open-mobile-menu>
+          <span class="nav-menu-icon" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </span>
+        </button>
+      </nav>
+    `
+  }
 
   return `
     <nav class="top-nav panel">
-      <div class="nav-brand">
-        <p class="eyebrow">Job Web</p>
-        <h1>채용 탐색</h1>
-      </div>
+      <span class="nav-wordmark">JOB WEB</span>
       <div class="nav-tabs">
         ${items
           .map(
@@ -538,15 +722,9 @@ function renderNavigation() {
   `
 }
 
-function renderSearchPanel() {
+function renderSearchControls() {
   return `
-    <aside class="panel search-panel">
-      <div class="panel-header">
-        <p class="eyebrow">Search</p>
-        <h2>키워드와 필터</h2>
-        <p class="panel-copy">검색은 키워드와 회사 필터만 사용합니다.</p>
-      </div>
-
+    <div class="control-stack">
       <label class="field">
         <span class="field-label">검색어</span>
         <input class="text-input" type="text" placeholder="회사, 팀, 스킬, 키워드" value="${escapeHtml(state.draftKeyword)}" />
@@ -566,40 +744,43 @@ function renderSearchPanel() {
         <button class="primary-button" type="button" data-search>검색</button>
         <button class="secondary-button" type="button" data-reset>초기화</button>
       </div>
+    </div>
+  `
+}
+
+function renderSearchPanel() {
+  return `
+    <aside class="panel search-panel">
+      ${renderSearchControls()}
     </aside>
   `
 }
 
-function renderRecommendationPanel() {
+function renderRecommendationControls({ mobile = false } = {}) {
   const profile = state.resumeProfile
   const resume = state.resume
 
   if (!profile) {
     return `
-      <aside class="panel search-panel">
-        <div class="panel-header">
-          <p class="eyebrow">Recommend</p>
-          <h2>이력서 기반 추천</h2>
-          <p class="panel-copy">최신 이력서를 바탕으로 공고를 추천합니다.</p>
-        </div>
+      <div class="control-stack">
         <div class="resume-placeholder">
-          추천을 사용하려면 먼저 최신 이력서를 업로드해 주세요.
+          ${mobile ? '추천은 데스크탑에서 최신 이력서를 등록한 뒤 사용할 수 있습니다.' : '추천을 사용하려면 먼저 최신 이력서를 업로드해 주세요.'}
         </div>
-        <div class="panel-actions">
-          <button class="primary-button" type="button" data-tab-jump="update">이력서 업데이트로 이동</button>
-        </div>
-      </aside>
+        ${
+          mobile
+            ? ''
+            : `
+              <div class="panel-actions">
+                <button class="primary-button" type="button" data-tab-jump="update">이력서 업데이트로 이동</button>
+              </div>
+            `
+        }
+      </div>
     `
   }
 
   return `
-    <aside class="panel search-panel">
-      <div class="panel-header">
-        <p class="eyebrow">Recommend</p>
-        <h2>이력서 기반 추천</h2>
-        <p class="panel-copy">최신 이력서 profile과 공고 필드를 비교해서 우선순위를 정합니다.</p>
-      </div>
-
+    <div class="control-stack">
       <section class="recommend-summary">
         <p class="detail-label">최근 이력서</p>
         <h3>${escapeHtml(profile.candidate_name || resume?.filename || '최근 이력서')}</h3>
@@ -634,36 +815,36 @@ function renderRecommendationPanel() {
 
       <div class="panel-actions">
         <button class="primary-button" type="button" data-recommend-refresh>추천 새로고침</button>
-        <button class="secondary-button" type="button" data-tab-jump="update">이력서 갱신</button>
+        ${mobile ? '' : '<button class="secondary-button" type="button" data-tab-jump="update">이력서 갱신</button>'}
       </div>
+    </div>
+  `
+}
+
+function renderRecommendationPanel() {
+  return `
+    <aside class="panel search-panel">
+      ${renderRecommendationControls()}
     </aside>
   `
 }
 
 function renderResultsPanel() {
   const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize))
-  const eyebrow =
-    state.activeTab === 'recommend'
-      ? 'Resume Recommendation'
-      : state.source === 'elasticsearch'
-        ? 'Elasticsearch Search'
-        : 'PostgreSQL Listing'
-  const title = state.activeTab === 'recommend' ? '추천 공고' : '검색 결과'
 
   return `
     <section class="panel results-panel">
       <div class="results-header">
-        <div>
-          <p class="eyebrow">${eyebrow}</p>
-          <h2>${title}</h2>
-        </div>
-        <p class="results-meta">총 ${state.total}건</p>
+        <p class="results-total">총 ${state.total}건</p>
       </div>
 
-      ${state.error ? `<div class="results-state">${escapeHtml(state.error)}</div>` : ''}
-      ${state.activeTab === 'search' && !state.searchReady ? '<div class="results-state">검색 인덱스가 아직 준비되지 않아 빈 결과를 표시하고 있습니다.</div>' : ''}
-
-      ${renderJobs()}
+      ${
+        state.error
+          ? `<div class="results-state">${escapeHtml(state.error)}</div>`
+          : state.activeTab === 'search' && !state.searchReady
+            ? '<div class="results-state">검색 인덱스가 아직 준비되지 않아 빈 결과를 표시하고 있습니다.</div>'
+            : renderJobs()
+      }
 
       <div class="pagination">
         <button class="secondary-button" type="button" data-page="prev" ${state.page <= 1 ? 'disabled' : ''}>이전</button>
@@ -671,6 +852,38 @@ function renderResultsPanel() {
         <button class="secondary-button" type="button" data-page="next" ${state.page >= totalPages ? 'disabled' : ''}>다음</button>
       </div>
     </section>
+  `
+}
+
+function renderMobileMenu() {
+  if (!state.isMobile) {
+    return ''
+  }
+
+  return `
+    <div class="mobile-menu-shell ${state.mobileMenuOpen ? 'open' : ''}">
+      <button class="mobile-menu-backdrop" type="button" aria-label="메뉴 닫기" data-close-mobile-menu></button>
+      <aside class="mobile-menu-panel">
+        <div class="mobile-menu-header">
+          <span class="nav-wordmark">JOB WEB</span>
+          <button class="icon-button" type="button" data-close-mobile-menu>닫기</button>
+        </div>
+        <div class="mobile-menu-tabs">
+          ${availableTabs(true)
+            .map(
+              (id) => `
+                <button class="nav-tab ${state.activeTab === id ? 'active' : ''}" type="button" data-tab="${id}">
+                  ${TAB_LABELS[id]}
+                </button>
+              `,
+            )
+            .join('')}
+        </div>
+        <div class="mobile-menu-content">
+          ${state.activeTab === 'recommend' ? renderRecommendationControls({ mobile: true }) : renderSearchControls()}
+        </div>
+      </aside>
+    </div>
   `
 }
 
@@ -795,6 +1008,10 @@ function renderMainContent() {
     return renderResumePanel()
   }
 
+  if (state.isMobile) {
+    return renderResultsPanel()
+  }
+
   return `
     <div class="layout">
       ${state.activeTab === 'recommend' ? renderRecommendationPanel() : renderSearchPanel()}
@@ -812,6 +1029,7 @@ function render() {
         ${renderNavigation()}
         ${renderMainContent()}
       </main>
+      ${renderMobileMenu()}
       ${renderDrawer()}
     </div>
   `
@@ -824,6 +1042,7 @@ function executeSearch() {
   state.page = 1
   state.selectedJobId = null
   state.selectedJob = null
+  state.mobileMenuOpen = false
   loadJobs()
 }
 
@@ -834,24 +1053,29 @@ function resetSearch() {
   state.page = 1
   state.selectedJobId = null
   state.selectedJob = null
+  state.mobileMenuOpen = false
   loadJobs()
 }
 
 function switchTab(nextTab) {
-  if (!nextTab || nextTab === state.activeTab) {
+  const normalizedTab = normalizeTab(nextTab, state.isMobile)
+  if (!normalizedTab || normalizedTab === state.activeTab) {
+    state.mobileMenuOpen = false
+    render()
     return
   }
 
-  state.activeTab = nextTab
+  state.activeTab = normalizedTab
   state.page = 1
   state.selectedJobId = null
   state.selectedJob = null
   state.error = ''
-  window.localStorage.setItem('job-web:active-tab', nextTab)
+  state.mobileMenuOpen = false
+  window.localStorage.setItem('job-web:active-tab', normalizedTab)
 
   render()
 
-  if (nextTab === 'update') {
+  if (normalizedTab === 'update') {
     return
   }
 
@@ -870,6 +1094,8 @@ function bindEvents() {
   const resumeForm = root.querySelector('[data-resume-form]')
   const tabButtons = root.querySelectorAll('[data-tab]')
   const tabJumpButtons = root.querySelectorAll('[data-tab-jump]')
+  const openMobileMenuButton = root.querySelector('[data-open-mobile-menu]')
+  const closeMobileMenuButtons = root.querySelectorAll('[data-close-mobile-menu]')
 
   keywordInput?.addEventListener('input', (event) => {
     state.draftKeyword = event.target.value
@@ -885,6 +1111,7 @@ function bindEvents() {
   resetButton?.addEventListener('click', resetSearch)
   refreshButton?.addEventListener('click', () => {
     state.page = 1
+    state.mobileMenuOpen = false
     loadJobs()
   })
 
@@ -934,7 +1161,20 @@ function bindEvents() {
       if (!jobId) {
         return
       }
+      state.mobileMenuOpen = false
       loadJobDetail(jobId)
+    })
+  })
+
+  openMobileMenuButton?.addEventListener('click', () => {
+    state.mobileMenuOpen = true
+    render()
+  })
+
+  closeMobileMenuButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      state.mobileMenuOpen = false
+      render()
     })
   })
 
@@ -967,6 +1207,36 @@ function bindEvents() {
 
     await uploadResume(file)
   })
+}
+
+function syncViewportState(isMobile) {
+  const nextTab = normalizeTab(state.activeTab, isMobile)
+  const tabChanged = nextTab !== state.activeTab
+
+  state.isMobile = isMobile
+  state.mobileMenuOpen = false
+
+  if (tabChanged) {
+    state.activeTab = nextTab
+    window.localStorage.setItem('job-web:active-tab', nextTab)
+  }
+
+  return tabChanged
+}
+
+const handleViewportChange = (event) => {
+  const tabChanged = syncViewportState(event.matches)
+  render()
+
+  if (tabChanged && state.activeTab !== 'update') {
+    loadJobs()
+  }
+}
+
+if (typeof MOBILE_VIEWPORT_QUERY.addEventListener === 'function') {
+  MOBILE_VIEWPORT_QUERY.addEventListener('change', handleViewportChange)
+} else {
+  MOBILE_VIEWPORT_QUERY.addListener(handleViewportChange)
 }
 
 render()
