@@ -1,84 +1,3 @@
-const mockJobs = [
-  {
-    id: 'job-1',
-    company: 'OpenAI Korea',
-    title: 'Frontend Engineer, Hiring Experience',
-    location: 'Seoul, KR',
-    team: 'Hiring Platform',
-    description: '채용 탐색과 지원 전환율을 높이는 사용자 경험을 담당하는 팀입니다.',
-    qualification: ['5+ years in frontend development', 'Strong React and TypeScript skills', 'Experience with search-driven interfaces'],
-    preferred: ['Experience with Elasticsearch-backed products', 'Design systems experience'],
-    originalUrl: 'https://example.com/jobs/job-1',
-    postedAt: '2026-05-20T09:00:00Z',
-    recommendationScore: 98,
-  },
-  {
-    id: 'job-2',
-    company: 'Coupang',
-    title: 'Senior Product Engineer, Candidate Search',
-    location: 'Seoul, KR',
-    team: 'Talent Intelligence',
-    description: '채용 데이터를 검색하고 추천하는 인터널 제품을 개발하는 팀입니다.',
-    qualification: ['Experience building product UIs', 'Strong API integration experience'],
-    preferred: ['Search relevance tuning', 'B2B workflow products'],
-    originalUrl: 'https://example.com/jobs/job-2',
-    postedAt: '2026-05-18T08:30:00Z',
-    recommendationScore: 94,
-  },
-  {
-    id: 'job-3',
-    company: 'Toss',
-    title: 'Frontend Developer, Growth Recruiting',
-    location: 'Seoul, KR',
-    team: 'People Platform',
-    description: '빠르게 변화하는 채용 프로세스를 지원하는 내부 도구를 만드는 팀입니다.',
-    qualification: ['Solid UI engineering fundamentals', 'Accessibility and responsive design'],
-    preferred: ['Experience with analytics', 'Familiarity with experimentation'],
-    originalUrl: 'https://example.com/jobs/job-3',
-    postedAt: '2026-05-22T04:15:00Z',
-    recommendationScore: 91,
-  },
-  {
-    id: 'job-4',
-    company: 'Kakao',
-    title: 'Web Engineer, Career Products',
-    location: 'Pangyo, KR',
-    team: 'Career Services',
-    description: '구직자와 채용담당자 모두를 위한 경력 서비스 경험을 개선하는 팀입니다.',
-    qualification: ['Production React experience', 'Collaborative product development'],
-    preferred: ['Search UI experience', 'SSR knowledge'],
-    originalUrl: 'https://example.com/jobs/job-4',
-    postedAt: '2026-05-14T02:00:00Z',
-    recommendationScore: 87,
-  },
-  {
-    id: 'job-5',
-    company: 'Naver',
-    title: 'Frontend Engineer, Job Discovery',
-    location: 'Seongnam, KR',
-    team: 'Discovery UX',
-    description: '탐색, 필터링, 상세 확인까지 이어지는 구직 흐름을 설계하는 팀입니다.',
-    qualification: ['Advanced JavaScript and TypeScript', 'Experience with large-scale web apps'],
-    preferred: ['Search and recommendation domain knowledge', 'Performance optimization'],
-    originalUrl: 'https://example.com/jobs/job-5',
-    postedAt: '2026-05-23T01:45:00Z',
-    recommendationScore: 89,
-  },
-  {
-    id: 'job-6',
-    company: 'Line Plus',
-    title: 'Frontend Engineer, Talent Matching',
-    location: 'Seoul, KR',
-    team: 'Matching Experience',
-    description: '이력서 기반 매칭 결과를 제품 안에서 자연스럽게 보여주는 팀입니다.',
-    qualification: ['Experience with component-driven UIs', 'Hands-on REST API integration'],
-    preferred: ['Recommendation systems exposure', 'Data-heavy interface design'],
-    originalUrl: 'https://example.com/jobs/job-6',
-    postedAt: '2026-05-21T11:20:00Z',
-    recommendationScore: 92,
-  },
-]
-
 const state = {
   draftKeyword: '',
   searchKeyword: '',
@@ -87,15 +6,21 @@ const state = {
   jobs: [],
   total: 0,
   page: 1,
-  pageSize: 4,
+  pageSize: 12,
   hasResume: true,
   selectedJobId: null,
+  selectedJob: null,
+  loading: false,
+  detailLoading: false,
+  error: '',
+  searchReady: true,
+  source: 'postgres',
 }
 
 const root = document.querySelector('#root')
 
 function escapeHtml(value) {
-  return value
+  return String(value ?? '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
@@ -104,60 +29,116 @@ function escapeHtml(value) {
 }
 
 function formatDate(value) {
+  if (!value) {
+    return '미정'
+  }
+
   return new Date(value).toLocaleDateString('ko-KR')
 }
 
-function getCompanyOptions(keyword) {
-  const lowered = keyword.trim().toLowerCase()
-  return mockJobs
-    .filter((job) => {
-      if (!lowered) {
-        return true
-      }
-      const haystack = [job.title, job.team, job.description, job.company].join(' ').toLowerCase()
-      return haystack.includes(lowered)
-    })
-    .map((job) => job.company)
-    .filter((company, index, companies) => companies.indexOf(company) === index)
-    .sort((left, right) => left.localeCompare(right))
+function splitTextLines(value) {
+  return String(value || '')
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
 }
 
-function searchJobs() {
-  const keyword = state.searchKeyword.trim().toLowerCase()
-  const filtered = mockJobs.filter((job) => {
-    const companyMatched = state.selectedCompanies.length === 0 || state.selectedCompanies.includes(job.company)
-    const haystack = [job.title, job.team, job.description, job.company].join(' ').toLowerCase()
-    const keywordMatched = !keyword || haystack.includes(keyword)
-    return companyMatched && keywordMatched
-  })
-
-  const sorted = [...filtered].sort((left, right) => {
-    if (!state.searchKeyword.trim() && state.selectedCompanies.length === 0) {
-      if (state.hasResume) {
-        return (right.recommendationScore || 0) - (left.recommendationScore || 0)
-      }
-      return Date.parse(right.postedAt) - Date.parse(left.postedAt)
-    }
-
-    const scoreGap = (right.recommendationScore || 0) - (left.recommendationScore || 0)
-    if (scoreGap !== 0) {
-      return scoreGap
-    }
-    return Date.parse(right.postedAt) - Date.parse(left.postedAt)
-  })
-
-  state.total = sorted.length
-  const start = (state.page - 1) * state.pageSize
-  state.jobs = sorted.slice(start, start + state.pageSize)
+function jobSummary(job) {
+  return job.team_description || job.raw_description || job.responsibilities || '상세 설명이 아직 없습니다.'
 }
 
-function getSelectedJob() {
-  return mockJobs.find((job) => job.id === state.selectedJobId) || null
+function qualificationItems(job) {
+  return splitTextLines(job.minimum_qualifications)
+}
+
+function preferredItems(job) {
+  return splitTextLines(job.preferred_qualifications)
+}
+
+function buildQuery() {
+  const params = new URLSearchParams()
+  params.set('page', String(state.page))
+  params.set('page_size', String(state.pageSize))
+
+  state.selectedCompanies.forEach((company) => {
+    params.append('company', company)
+  })
+
+  if (state.searchKeyword.trim()) {
+    params.set('q', state.searchKeyword.trim())
+  }
+
+  return params.toString()
+}
+
+async function requestJson(url) {
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+    },
+  })
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}))
+    throw new Error(payload.message || `Request failed: ${response.status}`)
+  }
+
+  return response.json()
+}
+
+async function loadJobs() {
+  state.loading = true
+  state.error = ''
+  render()
+
+  try {
+    const query = buildQuery()
+    const endpoint = state.searchKeyword.trim() ? `/api/jobs/search?${query}` : `/api/jobs?${query}`
+    const payload = await requestJson(endpoint)
+
+    state.jobs = payload.jobs || []
+    state.total = payload.total || 0
+    state.page = payload.page || 1
+    state.pageSize = payload.page_size || state.pageSize
+    state.companies = payload.companies || []
+    state.source = payload.source || 'postgres'
+    state.searchReady = payload.search_ready !== false
+
+    if (state.selectedJobId && !state.jobs.some((job) => job.job_id === state.selectedJobId)) {
+      state.selectedJobId = null
+      state.selectedJob = null
+    }
+  } catch (error) {
+    state.jobs = []
+    state.total = 0
+    state.error = error.message || '데이터를 불러오지 못했습니다.'
+  } finally {
+    state.loading = false
+    render()
+  }
+}
+
+async function loadJobDetail(jobId) {
+  state.selectedJobId = jobId
+  state.detailLoading = true
+  state.error = ''
+  render()
+
+  try {
+    const payload = await requestJson(`/api/jobs/${encodeURIComponent(jobId)}`)
+    state.selectedJob = payload.job || null
+  } catch (error) {
+    state.selectedJob = null
+    state.error = error.message || '상세 정보를 불러오지 못했습니다.'
+  } finally {
+    state.detailLoading = false
+    render()
+  }
 }
 
 function renderCompanyOptions() {
   if (state.companies.length === 0) {
-    return '<p class="empty-hint">현재 조건에 맞는 회사가 없습니다.</p>'
+    return '<p class="empty-hint">표시할 회사가 아직 없습니다.</p>'
   }
 
   return state.companies
@@ -177,6 +158,10 @@ function renderCompanyOptions() {
 }
 
 function renderJobs() {
+  if (state.loading) {
+    return '<div class="results-state">공고를 불러오는 중입니다.</div>'
+  }
+
   if (state.jobs.length === 0) {
     return '<div class="results-state">조건에 맞는 공고가 없습니다.</div>'
   }
@@ -186,14 +171,14 @@ function renderJobs() {
       ${state.jobs
         .map(
           (job) => `
-            <button class="job-card ${state.selectedJobId === job.id ? 'selected' : ''}" type="button" data-job-id="${job.id}">
+            <button class="job-card ${state.selectedJobId === job.job_id ? 'selected' : ''}" type="button" data-job-id="${escapeHtml(job.job_id)}">
               <div class="job-card-header">
                 <span class="company-pill">${escapeHtml(job.company)}</span>
-                <span class="posted-at">${formatDate(job.postedAt)}</span>
+                <span class="posted-at">${formatDate(job.posted_at)}</span>
               </div>
               <h3>${escapeHtml(job.title)}</h3>
-              <p class="job-team">${escapeHtml(job.team)}</p>
-              <p class="job-description">${escapeHtml(job.description)}</p>
+              <p class="job-team">${escapeHtml(job.team || job.level_guess || '팀 정보 없음')}</p>
+              <p class="job-description">${escapeHtml(jobSummary(job))}</p>
             </button>
           `,
         )
@@ -203,8 +188,25 @@ function renderJobs() {
 }
 
 function renderDrawer() {
-  const job = getSelectedJob()
-  const isOpen = Boolean(job)
+  const job = state.selectedJob
+
+  if (state.detailLoading) {
+    return `
+      <div class="drawer-shell open">
+        <button class="drawer-backdrop" type="button" aria-label="상세 닫기" data-close-drawer></button>
+        <aside class="drawer-panel">
+          <div class="drawer-header">
+            <div>
+              <p class="eyebrow">Job Detail</p>
+              <h2>상세 정보</h2>
+            </div>
+            <button class="icon-button" type="button" data-close-drawer>닫기</button>
+          </div>
+          <div class="drawer-state">상세 정보를 불러오는 중입니다.</div>
+        </aside>
+      </div>
+    `
+  }
 
   if (!job) {
     return `
@@ -224,8 +226,11 @@ function renderDrawer() {
     `
   }
 
+  const qualifications = qualificationItems(job)
+  const preferred = preferredItems(job)
+
   return `
-    <div class="drawer-shell ${isOpen ? 'open' : ''}">
+    <div class="drawer-shell open">
       <button class="drawer-backdrop" type="button" aria-label="상세 닫기" data-close-drawer></button>
       <aside class="drawer-panel">
         <div class="drawer-header">
@@ -244,38 +249,52 @@ function renderDrawer() {
             </div>
             <div>
               <p class="detail-label">위치</p>
-              <p>${escapeHtml(job.location)}</p>
+              <p>${escapeHtml(job.location || '미정')}</p>
             </div>
             <div>
               <p class="detail-label">팀</p>
-              <p>${escapeHtml(job.team)}</p>
+              <p>${escapeHtml(job.team || job.level_guess || '미정')}</p>
             </div>
             <div>
               <p class="detail-label">게시일</p>
-              <p>${formatDate(job.postedAt)}</p>
+              <p>${formatDate(job.posted_at)}</p>
             </div>
           </div>
 
           <section class="detail-section">
-            <p class="detail-label">어떤 팀인지</p>
-            <p>${escapeHtml(job.description)}</p>
+            <p class="detail-label">설명</p>
+            <p>${escapeHtml(jobSummary(job))}</p>
+          </section>
+
+          <section class="detail-section">
+            <p class="detail-label">Responsibilities</p>
+            <p>${escapeHtml(job.responsibilities || '정보 없음')}</p>
           </section>
 
           <section class="detail-section">
             <p class="detail-label">Qualification</p>
-            <ul class="detail-list">
-              ${job.qualification.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}
-            </ul>
+            ${
+              qualifications.length
+                ? `<ul class="detail-list">${qualifications.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+                : '<p>정보 없음</p>'
+            }
           </section>
 
           <section class="detail-section">
             <p class="detail-label">Preferred</p>
-            <ul class="detail-list">
-              ${job.preferred.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}
-            </ul>
+            ${
+              preferred.length
+                ? `<ul class="detail-list">${preferred.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+                : '<p>정보 없음</p>'
+            }
           </section>
 
-          <a class="primary-button detail-link" href="${job.originalUrl}" target="_blank" rel="noreferrer">
+          <section class="detail-section">
+            <p class="detail-label">Skills</p>
+            <p>${escapeHtml((job.skills || []).join(', ') || '정보 없음')}</p>
+          </section>
+
+          <a class="primary-button detail-link" href="${escapeHtml(job.url)}" target="_blank" rel="noreferrer">
             원문 공고 보기
           </a>
         </div>
@@ -296,22 +315,22 @@ function render() {
           <div class="panel-header">
             <p class="eyebrow">Search</p>
             <h1>Job Finder</h1>
-            <p class="panel-copy">검색어와 회사 필터로 원하는 공고를 빠르게 좁혀보세요.</p>
+            <p class="panel-copy">PostgreSQL 목록과 Elasticsearch 검색 결과를 하나의 화면에서 확인합니다.</p>
           </div>
 
           <label class="field">
             <span class="field-label">검색어</span>
-            <input class="text-input" type="text" placeholder="회사, 팀, 키워드" value="${escapeHtml(state.draftKeyword)}" />
+            <input class="text-input" type="text" placeholder="회사, 팀, 스킬, 키워드" value="${escapeHtml(state.draftKeyword)}" />
           </label>
 
           <div class="field">
             <div class="field-row">
-              <span class="field-label">이력서 상태</span>
-              <span class="field-meta">${state.hasResume ? '추천순' : '최신순'}</span>
+              <span class="field-label">정렬 상태</span>
+              <span class="field-meta">${state.searchKeyword.trim() ? 'Elasticsearch 검색' : 'PostgreSQL 목록'}</span>
             </div>
             <div class="toggle-row">
-              <button class="toggle-chip ${state.hasResume ? 'active' : ''}" type="button" data-resume="true">이력서 있음</button>
-              <button class="toggle-chip ${!state.hasResume ? 'active' : ''}" type="button" data-resume="false">이력서 없음</button>
+              <button class="toggle-chip ${state.hasResume ? 'active' : ''}" type="button" data-resume="true">검색 사용</button>
+              <button class="toggle-chip ${!state.hasResume ? 'active' : ''}" type="button" data-resume="false">목록만 보기</button>
             </div>
           </div>
 
@@ -334,11 +353,14 @@ function render() {
         <section class="panel results-panel">
           <div class="results-header">
             <div>
-              <p class="eyebrow">${state.hasResume ? 'Resume Ranking' : 'Latest Postings'}</p>
+              <p class="eyebrow">${state.source === 'elasticsearch' ? 'Elasticsearch Search' : 'PostgreSQL Listing'}</p>
               <h2>검색 결과</h2>
             </div>
             <p class="results-meta">총 ${state.total}건</p>
           </div>
+
+          ${state.error ? `<div class="results-state">${escapeHtml(state.error)}</div>` : ''}
+          ${!state.searchReady ? '<div class="results-state">검색 인덱스가 아직 준비되지 않아 빈 결과를 표시하고 있습니다.</div>' : ''}
 
           ${renderJobs()}
 
@@ -357,13 +379,11 @@ function render() {
 }
 
 function executeSearch() {
-  state.searchKeyword = state.draftKeyword
+  state.searchKeyword = state.hasResume ? state.draftKeyword.trim() : ''
   state.page = 1
-  state.companies = getCompanyOptions(state.searchKeyword)
-  state.selectedCompanies = state.selectedCompanies.filter((company) => state.companies.includes(company))
   state.selectedJobId = null
-  searchJobs()
-  render()
+  state.selectedJob = null
+  loadJobs()
 }
 
 function resetSearch() {
@@ -371,10 +391,9 @@ function resetSearch() {
   state.searchKeyword = ''
   state.selectedCompanies = []
   state.selectedJobId = null
+  state.selectedJob = null
   state.page = 1
-  state.companies = getCompanyOptions('')
-  searchJobs()
-  render()
+  loadJobs()
 }
 
 function bindEvents() {
@@ -419,9 +438,9 @@ function bindEvents() {
     button.addEventListener('click', (event) => {
       state.hasResume = event.currentTarget.dataset.resume === 'true'
       window.localStorage.setItem('job-web:resume', String(state.hasResume))
-      state.selectedJobId = null
-      state.page = 1
-      searchJobs()
+      if (!state.hasResume) {
+        state.searchKeyword = ''
+      }
       render()
     })
   })
@@ -434,27 +453,29 @@ function bindEvents() {
         return
       }
       state.page = nextPage
-      searchJobs()
-      render()
+      loadJobs()
     })
   })
 
   jobButtons.forEach((button) => {
     button.addEventListener('click', (event) => {
-      state.selectedJobId = event.currentTarget.dataset.jobId
-      render()
+      const jobId = event.currentTarget.dataset.jobId
+      if (!jobId) {
+        return
+      }
+      loadJobDetail(jobId)
     })
   })
 
   closeButtons.forEach((button) => {
     button.addEventListener('click', () => {
       state.selectedJobId = null
+      state.selectedJob = null
       render()
     })
   })
 }
 
 state.hasResume = window.localStorage.getItem('job-web:resume') !== 'false'
-state.companies = getCompanyOptions('')
-searchJobs()
 render()
+loadJobs()
