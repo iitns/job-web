@@ -1,12 +1,16 @@
+import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
 import requests
+from docx import Document
 from flask import Flask, jsonify, request, send_from_directory
+from werkzeug.utils import secure_filename
 
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -14,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 DIST_DIR = BASE_DIR / "dist"
+RESUME_STORAGE_DIR = Path(os.environ.get("RESUME_STORAGE_DIR", "/data/resumes"))
 
 app = Flask(__name__, static_folder=str(DIST_DIR), static_url_path="")
 
@@ -27,8 +32,59 @@ PG_CONFIG = {
 
 ES_HOST = os.environ.get("ES_HOST", "http://elasticsearch-service.default.svc.cluster.local:9200").rstrip("/")
 ES_INDEX = os.environ.get("ES_INDEX", "job_recommender_jobs")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "").rstrip("/")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "")
+
 DEFAULT_PAGE_SIZE = 12
 MAX_PAGE_SIZE = 50
+ALLOWED_RESUME_EXTENSIONS = {".docx"}
+
+RESUME_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS resumes (
+    id BIGSERIAL PRIMARY KEY,
+    filename TEXT NOT NULL,
+    content_type TEXT,
+    storage_path TEXT NOT NULL,
+    file_size_bytes BIGINT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'uploaded',
+    raw_text TEXT,
+    extract_error TEXT,
+    llm_model TEXT,
+    normalization_method TEXT,
+    normalized_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS resume_profiles (
+    resume_id BIGINT PRIMARY KEY REFERENCES resumes(id) ON DELETE CASCADE,
+    candidate_name TEXT,
+    summary TEXT,
+    years_of_experience NUMERIC(4,1),
+    current_title TEXT,
+    seniority TEXT,
+    locations TEXT[] NOT NULL DEFAULT '{}',
+    skills TEXT[] NOT NULL DEFAULT '{}',
+    domains TEXT[] NOT NULL DEFAULT '{}',
+    companies TEXT[] NOT NULL DEFAULT '{}',
+    roles TEXT[] NOT NULL DEFAULT '{}',
+    preferred_job_titles TEXT[] NOT NULL DEFAULT '{}',
+    preferred_locations TEXT[] NOT NULL DEFAULT '{}',
+    team_keywords TEXT[] NOT NULL DEFAULT '{}',
+    responsibility_keywords TEXT[] NOT NULL DEFAULT '{}',
+    qualification_keywords TEXT[] NOT NULL DEFAULT '{}',
+    education JSONB NOT NULL DEFAULT '[]'::jsonb,
+    certifications TEXT[] NOT NULL DEFAULT '{}',
+    projects JSONB NOT NULL DEFAULT '[]'::jsonb,
+    experience_items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    raw_profile_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_resumes_created_at ON resumes(created_at DESC);
+"""
 
 
 def get_page_args() -> tuple[int, int]:
@@ -47,6 +103,14 @@ def get_companies_arg() -> list[str]:
 
 def db_connect():
     return psycopg2.connect(**PG_CONFIG)
+
+
+def ensure_runtime_state() -> None:
+    RESUME_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(RESUME_SCHEMA_SQL)
+        conn.commit()
 
 
 def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
@@ -71,6 +135,58 @@ def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
         "last_seen_at": row.get("last_seen_at").isoformat() if row.get("last_seen_at") else None,
         "is_active": row.get("is_active", True),
         "detail_extracted_at": row.get("detail_extracted_at").isoformat() if row.get("detail_extracted_at") else None,
+    }
+
+
+def serialize_resume(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+
+    return {
+        "id": row.get("id"),
+        "filename": row.get("filename"),
+        "content_type": row.get("content_type"),
+        "storage_path": row.get("storage_path"),
+        "file_size_bytes": row.get("file_size_bytes"),
+        "status": row.get("status"),
+        "raw_text": row.get("raw_text"),
+        "extract_error": row.get("extract_error"),
+        "llm_model": row.get("llm_model"),
+        "normalization_method": row.get("normalization_method"),
+        "normalized_at": row.get("normalized_at").isoformat() if row.get("normalized_at") else None,
+        "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+        "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+    }
+
+
+def serialize_resume_profile(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+
+    return {
+        "resume_id": row.get("resume_id"),
+        "candidate_name": row.get("candidate_name"),
+        "summary": row.get("summary"),
+        "years_of_experience": float(row["years_of_experience"]) if row.get("years_of_experience") is not None else None,
+        "current_title": row.get("current_title"),
+        "seniority": row.get("seniority"),
+        "locations": row.get("locations") or [],
+        "skills": row.get("skills") or [],
+        "domains": row.get("domains") or [],
+        "companies": row.get("companies") or [],
+        "roles": row.get("roles") or [],
+        "preferred_job_titles": row.get("preferred_job_titles") or [],
+        "preferred_locations": row.get("preferred_locations") or [],
+        "team_keywords": row.get("team_keywords") or [],
+        "responsibility_keywords": row.get("responsibility_keywords") or [],
+        "qualification_keywords": row.get("qualification_keywords") or [],
+        "education": row.get("education") or [],
+        "certifications": row.get("certifications") or [],
+        "projects": row.get("projects") or [],
+        "experience_items": row.get("experience_items") or [],
+        "raw_profile_json": row.get("raw_profile_json") or {},
+        "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+        "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
     }
 
 
@@ -252,9 +368,387 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
     }
 
 
+def allowed_resume_file(filename: str) -> bool:
+    return Path(filename).suffix.lower() in ALLOWED_RESUME_EXTENSIONS
+
+
+def save_uploaded_resume(file_storage) -> tuple[Path, int]:
+    safe_name = secure_filename(file_storage.filename or "resume.docx")
+    target_path = RESUME_STORAGE_DIR / safe_name
+    suffix = 1
+    while target_path.exists():
+        target_path = RESUME_STORAGE_DIR / f"{Path(safe_name).stem}-{suffix}{Path(safe_name).suffix}"
+        suffix += 1
+    file_storage.save(target_path)
+    return target_path, target_path.stat().st_size
+
+
+def extract_text_from_docx(docx_path: Path) -> str:
+    document = Document(str(docx_path))
+    parts: list[str] = []
+
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if text:
+            parts.append(text)
+
+    for table in document.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+            if cells:
+                parts.append(" | ".join(cells))
+
+    return "\n".join(parts).strip()
+
+
+def dedupe_text_items(items: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in items:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        lowered = value.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(value)
+    return normalized
+
+
+def parse_json_payload(text: str) -> dict[str, Any]:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return json.loads(text)
+
+
+def normalize_resume_with_llm(raw_text: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not (LLM_BASE_URL and LLM_API_KEY and LLM_MODEL):
+        return fallback_resume_profile(raw_text), {
+            "normalization_method": "fallback",
+            "llm_model": None,
+        }
+
+    prompt = {
+        "role": "user",
+        "content": (
+            "Normalize the following resume into JSON. "
+            "Return only valid JSON with these keys: "
+            "candidate_name, summary, years_of_experience, current_title, seniority, "
+            "locations, skills, domains, companies, roles, preferred_job_titles, "
+            "preferred_locations, team_keywords, responsibility_keywords, qualification_keywords, "
+            "education, certifications, projects, experience_items. "
+            "education, projects, and experience_items must be arrays. "
+            "skills/domains/companies/roles and keyword fields must be arrays of strings. "
+            "Focus on fields that map well to software engineering job postings.\n\n"
+            f"Resume:\n{raw_text}"
+        ),
+    }
+
+    response = requests.post(
+        f"{LLM_BASE_URL}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {LLM_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": LLM_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You extract structured recruiting profiles from resumes. Output JSON only.",
+                },
+                prompt,
+            ],
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    content = payload["choices"][0]["message"]["content"]
+    parsed = parse_json_payload(content)
+    return parsed, {
+        "normalization_method": "llm",
+        "llm_model": LLM_MODEL,
+    }
+
+
+def fallback_resume_profile(raw_text: str) -> dict[str, Any]:
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    summary = " ".join(lines[:5])[:800]
+    candidate_name = lines[0] if lines else None
+
+    known_skills = [
+        "Python", "Java", "JavaScript", "TypeScript", "React", "Vue", "Node.js",
+        "PostgreSQL", "MySQL", "MongoDB", "Redis", "Elasticsearch", "Docker",
+        "Kubernetes", "AWS", "GCP", "Azure", "Flask", "Django", "FastAPI",
+        "Spring", "Go", "Rust", "C++", "C#", "TensorFlow", "PyTorch",
+    ]
+    found_skills = [skill for skill in known_skills if re.search(rf"\b{re.escape(skill)}\b", raw_text, re.IGNORECASE)]
+
+    companies = []
+    roles = []
+    for line in lines[:30]:
+        if re.search(r"\b(engineer|developer|manager|lead|architect)\b", line, re.IGNORECASE):
+            roles.append(line[:120])
+
+    return {
+        "candidate_name": candidate_name,
+        "summary": summary,
+        "years_of_experience": None,
+        "current_title": roles[0] if roles else None,
+        "seniority": None,
+        "locations": [],
+        "skills": dedupe_text_items(found_skills),
+        "domains": [],
+        "companies": dedupe_text_items(companies),
+        "roles": dedupe_text_items(roles),
+        "preferred_job_titles": [],
+        "preferred_locations": [],
+        "team_keywords": [],
+        "responsibility_keywords": [],
+        "qualification_keywords": dedupe_text_items(found_skills),
+        "education": [],
+        "certifications": [],
+        "projects": [],
+        "experience_items": [],
+    }
+
+
+def sanitize_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    years_of_experience = profile.get("years_of_experience")
+    try:
+        years_of_experience = float(years_of_experience) if years_of_experience is not None else None
+    except (TypeError, ValueError):
+        years_of_experience = None
+
+    return {
+        "candidate_name": profile.get("candidate_name"),
+        "summary": profile.get("summary"),
+        "years_of_experience": years_of_experience,
+        "current_title": profile.get("current_title"),
+        "seniority": profile.get("seniority"),
+        "locations": dedupe_text_items(profile.get("locations", [])),
+        "skills": dedupe_text_items(profile.get("skills", [])),
+        "domains": dedupe_text_items(profile.get("domains", [])),
+        "companies": dedupe_text_items(profile.get("companies", [])),
+        "roles": dedupe_text_items(profile.get("roles", [])),
+        "preferred_job_titles": dedupe_text_items(profile.get("preferred_job_titles", [])),
+        "preferred_locations": dedupe_text_items(profile.get("preferred_locations", [])),
+        "team_keywords": dedupe_text_items(profile.get("team_keywords", [])),
+        "responsibility_keywords": dedupe_text_items(profile.get("responsibility_keywords", [])),
+        "qualification_keywords": dedupe_text_items(profile.get("qualification_keywords", [])),
+        "education": profile.get("education", []),
+        "certifications": dedupe_text_items(profile.get("certifications", [])),
+        "projects": profile.get("projects", []),
+        "experience_items": profile.get("experience_items", []),
+    }
+
+
+def insert_resume_record(*, filename: str, content_type: str | None, storage_path: Path, file_size_bytes: int) -> int:
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO resumes (filename, content_type, storage_path, file_size_bytes, status)
+                VALUES (%s, %s, %s, %s, 'uploaded')
+                RETURNING id
+                """,
+                (filename, content_type, str(storage_path), file_size_bytes),
+            )
+            resume_id = cur.fetchone()[0]
+        conn.commit()
+    return resume_id
+
+
+def update_resume_text(*, resume_id: int, raw_text: str) -> None:
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE resumes
+                SET raw_text = %s,
+                    status = 'text_extracted',
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (raw_text, resume_id),
+            )
+        conn.commit()
+
+
+def update_resume_failure(*, resume_id: int, message: str) -> None:
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE resumes
+                SET status = 'failed',
+                    extract_error = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (message, resume_id),
+            )
+        conn.commit()
+
+
+def upsert_resume_profile(*, resume_id: int, profile: dict[str, Any], metadata: dict[str, Any]) -> None:
+    profile = sanitize_profile(profile)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO resume_profiles (
+                    resume_id, candidate_name, summary, years_of_experience, current_title,
+                    seniority, locations, skills, domains, companies, roles,
+                    preferred_job_titles, preferred_locations, team_keywords,
+                    responsibility_keywords, qualification_keywords, education,
+                    certifications, projects, experience_items, raw_profile_json
+                )
+                VALUES (
+                    %(resume_id)s, %(candidate_name)s, %(summary)s, %(years_of_experience)s, %(current_title)s,
+                    %(seniority)s, %(locations)s, %(skills)s, %(domains)s, %(companies)s, %(roles)s,
+                    %(preferred_job_titles)s, %(preferred_locations)s, %(team_keywords)s,
+                    %(responsibility_keywords)s, %(qualification_keywords)s, %(education)s,
+                    %(certifications)s, %(projects)s, %(experience_items)s, %(raw_profile_json)s
+                )
+                ON CONFLICT (resume_id) DO UPDATE SET
+                    candidate_name = EXCLUDED.candidate_name,
+                    summary = EXCLUDED.summary,
+                    years_of_experience = EXCLUDED.years_of_experience,
+                    current_title = EXCLUDED.current_title,
+                    seniority = EXCLUDED.seniority,
+                    locations = EXCLUDED.locations,
+                    skills = EXCLUDED.skills,
+                    domains = EXCLUDED.domains,
+                    companies = EXCLUDED.companies,
+                    roles = EXCLUDED.roles,
+                    preferred_job_titles = EXCLUDED.preferred_job_titles,
+                    preferred_locations = EXCLUDED.preferred_locations,
+                    team_keywords = EXCLUDED.team_keywords,
+                    responsibility_keywords = EXCLUDED.responsibility_keywords,
+                    qualification_keywords = EXCLUDED.qualification_keywords,
+                    education = EXCLUDED.education,
+                    certifications = EXCLUDED.certifications,
+                    projects = EXCLUDED.projects,
+                    experience_items = EXCLUDED.experience_items,
+                    raw_profile_json = EXCLUDED.raw_profile_json,
+                    updated_at = NOW()
+                """,
+                {
+                    "resume_id": resume_id,
+                    "candidate_name": profile["candidate_name"],
+                    "summary": profile["summary"],
+                    "years_of_experience": profile["years_of_experience"],
+                    "current_title": profile["current_title"],
+                    "seniority": profile["seniority"],
+                    "locations": profile["locations"],
+                    "skills": profile["skills"],
+                    "domains": profile["domains"],
+                    "companies": profile["companies"],
+                    "roles": profile["roles"],
+                    "preferred_job_titles": profile["preferred_job_titles"],
+                    "preferred_locations": profile["preferred_locations"],
+                    "team_keywords": profile["team_keywords"],
+                    "responsibility_keywords": profile["responsibility_keywords"],
+                    "qualification_keywords": profile["qualification_keywords"],
+                    "education": psycopg2.extras.Json(profile["education"]),
+                    "certifications": profile["certifications"],
+                    "projects": psycopg2.extras.Json(profile["projects"]),
+                    "experience_items": psycopg2.extras.Json(profile["experience_items"]),
+                    "raw_profile_json": psycopg2.extras.Json(profile),
+                },
+            )
+            cur.execute(
+                """
+                UPDATE resumes
+                SET status = 'normalized',
+                    llm_model = %s,
+                    normalization_method = %s,
+                    normalized_at = NOW(),
+                    extract_error = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (metadata.get("llm_model"), metadata.get("normalization_method"), resume_id),
+            )
+        conn.commit()
+
+
+def fetch_resume_and_profile(*, resume_id: int | None = None, latest: bool = False) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    clause = "r.id = %s"
+    params: tuple[Any, ...] = (resume_id,)
+    if latest:
+        clause = "TRUE"
+        params = ()
+
+    with db_connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    r.id,
+                    r.filename,
+                    r.content_type,
+                    r.storage_path,
+                    r.file_size_bytes,
+                    r.status,
+                    r.raw_text,
+                    r.extract_error,
+                    r.llm_model,
+                    r.normalization_method,
+                    r.normalized_at,
+                    r.created_at,
+                    r.updated_at
+                FROM resumes r
+                WHERE {clause}
+                ORDER BY r.created_at DESC
+                LIMIT 1
+                """,
+                params,
+            )
+            resume = cur.fetchone()
+
+            if not resume:
+                return None, None
+
+            cur.execute(
+                """
+                SELECT *
+                FROM resume_profiles
+                WHERE resume_id = %s
+                """,
+                (resume["id"],),
+            )
+            profile = cur.fetchone()
+
+    return dict(resume), dict(profile) if profile else None
+
+
+def process_uploaded_resume(*, resume_id: int, storage_path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    raw_text = extract_text_from_docx(storage_path)
+    update_resume_text(resume_id=resume_id, raw_text=raw_text)
+
+    profile, metadata = normalize_resume_with_llm(raw_text)
+    upsert_resume_profile(resume_id=resume_id, profile=profile, metadata=metadata)
+
+    resume, saved_profile = fetch_resume_and_profile(resume_id=resume_id)
+    return serialize_resume(resume), serialize_resume_profile(saved_profile)
+
+
 @app.get("/healthz")
 def healthz():
-    return jsonify({"ok": True})
+    try:
+        ensure_runtime_state()
+        return jsonify({"ok": True})
+    except Exception as exc:
+        logger.exception("Health check failed")
+        return jsonify({"ok": False, "message": str(exc)}), 500
 
 
 @app.get("/api/jobs")
@@ -329,6 +823,89 @@ def job_detail(job_id: str):
         return jsonify({"error": "failed_to_load_job_detail", "message": str(exc)}), 500
 
 
+@app.post("/api/resumes")
+def upload_resume():
+    ensure_runtime_state()
+
+    file_storage = request.files.get("file")
+    if file_storage is None or not file_storage.filename:
+        return jsonify({"error": "missing_file", "message": "A DOCX file is required."}), 400
+
+    if not allowed_resume_file(file_storage.filename):
+        return jsonify({"error": "invalid_file_type", "message": "Only .docx files are supported."}), 400
+
+    storage_path, file_size = save_uploaded_resume(file_storage)
+    resume_id = insert_resume_record(
+        filename=file_storage.filename,
+        content_type=file_storage.content_type,
+        storage_path=storage_path,
+        file_size_bytes=file_size,
+    )
+
+    try:
+        resume, profile = process_uploaded_resume(resume_id=resume_id, storage_path=storage_path)
+        return jsonify({"resume": resume, "profile": profile}), 201
+    except Exception as exc:
+        logger.exception("Failed to process uploaded resume")
+        update_resume_failure(resume_id=resume_id, message=str(exc))
+        resume, profile = fetch_resume_and_profile(resume_id=resume_id)
+        return jsonify({
+            "error": "resume_processing_failed",
+            "message": str(exc),
+            "resume": serialize_resume(resume),
+            "profile": serialize_resume_profile(profile),
+        }), 500
+
+
+@app.get("/api/resumes/latest")
+def latest_resume():
+    ensure_runtime_state()
+    resume, profile = fetch_resume_and_profile(latest=True)
+    if not resume:
+        return jsonify({"error": "resume_not_found"}), 404
+    return jsonify({"resume": serialize_resume(resume), "profile": serialize_resume_profile(profile)})
+
+
+@app.get("/api/resumes/<int:resume_id>")
+def get_resume(resume_id: int):
+    ensure_runtime_state()
+    resume, profile = fetch_resume_and_profile(resume_id=resume_id)
+    if not resume:
+        return jsonify({"error": "resume_not_found"}), 404
+    return jsonify({"resume": serialize_resume(resume), "profile": serialize_resume_profile(profile)})
+
+
+@app.get("/api/resumes/<int:resume_id>/profile")
+def get_resume_profile(resume_id: int):
+    ensure_runtime_state()
+    resume, profile = fetch_resume_and_profile(resume_id=resume_id)
+    if not resume:
+        return jsonify({"error": "resume_not_found"}), 404
+    return jsonify({"resume": serialize_resume(resume), "profile": serialize_resume_profile(profile)})
+
+
+@app.delete("/api/resumes/<int:resume_id>")
+def delete_resume(resume_id: int):
+    ensure_runtime_state()
+    resume, _profile = fetch_resume_and_profile(resume_id=resume_id)
+    if not resume:
+        return jsonify({"error": "resume_not_found"}), 404
+
+    storage_path = Path(resume["storage_path"])
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM resumes WHERE id = %s", (resume_id,))
+        conn.commit()
+
+    try:
+        if storage_path.exists():
+            storage_path.unlink()
+    except OSError:
+        logger.warning("Failed to delete resume file %s", storage_path)
+
+    return jsonify({"deleted": True, "resume_id": resume_id})
+
+
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def frontend(path: str):
@@ -339,6 +916,9 @@ def frontend(path: str):
     if path and candidate.exists() and candidate.is_file():
         return send_from_directory(DIST_DIR, path)
     return send_from_directory(DIST_DIR, "index.html")
+
+
+ensure_runtime_state()
 
 
 if __name__ == "__main__":
