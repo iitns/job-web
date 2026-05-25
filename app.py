@@ -90,6 +90,15 @@ def company_mark(company: str | None) -> str:
     return f"{words[0][0]}{words[1][0]}".upper()
 
 
+def tokenize_text(*parts: Any) -> set[str]:
+    tokens: set[str] = set()
+    for part in parts:
+        value = str(part or "").lower()
+        for token in re.findall(r"[a-z0-9+#.-]{2,}", value):
+            tokens.add(token)
+    return tokens
+
+
 def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
     summary = summarize_text(
         row.get("summary"),
@@ -117,6 +126,10 @@ def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
         "preferred_qualifications": row.get("preferred_qualifications"),
         "skills": row.get("skills") or [],
         "domains": row.get("domains") or [],
+        "matched_skills": row.get("matched_skills") or [],
+        "matched_domains": row.get("matched_domains") or [],
+        "recommendation_score": row.get("recommendation_score"),
+        "recommendation_reason": row.get("recommendation_reason"),
         "url": row.get("url"),
         "posted_at": row.get("posted_at").isoformat() if row.get("posted_at") else None,
         "first_seen_at": row.get("first_seen_at").isoformat() if row.get("first_seen_at") else None,
@@ -356,6 +369,162 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
     }
 
 
+def fetch_jobs_for_recommendation(*, companies: list[str]) -> list[dict[str, Any]]:
+    filters = ["is_active = TRUE"]
+    params: list[Any] = []
+
+    if companies:
+        filters.append("company = ANY(%s)")
+        params.append(companies)
+
+    where_clause = " AND ".join(filters)
+
+    with db_connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    job_id,
+                    company,
+                    title,
+                    location,
+                    locations,
+                    level_guess,
+                    team,
+                    raw_description,
+                    team_description,
+                    responsibilities,
+                    minimum_qualifications,
+                    preferred_qualifications,
+                    skills,
+                    domains,
+                    url,
+                    posted_at,
+                    first_seen_at,
+                    last_seen_at,
+                    is_active,
+                    detail_extracted_at
+                FROM jobs
+                WHERE {where_clause}
+                ORDER BY posted_at DESC NULLS LAST, last_seen_at DESC, job_id ASC
+                LIMIT 500
+                """,
+                params,
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+
+def build_recommendation_reason(*, matched_skills: list[str], matched_domains: list[str], title_match: bool, location_match: bool) -> str:
+    reasons: list[str] = []
+    if matched_skills:
+        reasons.append(f"skills {', '.join(matched_skills[:3])}")
+    if matched_domains:
+        reasons.append(f"domains {', '.join(matched_domains[:2])}")
+    if title_match:
+        reasons.append("title overlap")
+    if location_match:
+        reasons.append("location match")
+    return ", ".join(reasons) if reasons else "profile similarity"
+
+
+def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str]) -> dict[str, Any]:
+    resume, profile = fetch_resume_and_profile(latest=True)
+    if not resume or not profile:
+        raise ValueError("A processed resume is required before recommendations are available.")
+
+    profile_skills = dedupe_text_items(profile.get("skills", []))
+    profile_domains = dedupe_text_items(profile.get("domains", []))
+    profile_skill_set = {item.lower() for item in profile_skills}
+    profile_domain_set = {item.lower() for item in profile_domains}
+    title_hints = dedupe_text_items(
+        [
+            profile.get("current_title"),
+            *profile.get("roles", []),
+            *profile.get("preferred_job_titles", []),
+            *profile.get("team_keywords", []),
+        ]
+    )
+    location_hints = dedupe_text_items([*profile.get("locations", []), *profile.get("preferred_locations", [])])
+    profile_tokens = tokenize_text(profile.get("summary"), *title_hints, *profile_skills, *profile_domains)
+
+    jobs = fetch_jobs_for_recommendation(companies=companies)
+    scored_jobs: list[dict[str, Any]] = []
+
+    for job in jobs:
+        job_skills = dedupe_text_items(job.get("skills", []))
+        job_domains = dedupe_text_items(job.get("domains", []))
+        matched_skills = [skill for skill in job_skills if skill.lower() in profile_skill_set]
+        matched_domains = [domain for domain in job_domains if domain.lower() in profile_domain_set]
+
+        job_text_tokens = tokenize_text(
+            job.get("title"),
+            job.get("team"),
+            job.get("location"),
+            job.get("team_description"),
+            job.get("responsibilities"),
+            job.get("minimum_qualifications"),
+            job.get("preferred_qualifications"),
+            *job_skills,
+            *job_domains,
+        )
+        token_overlap = len(profile_tokens & job_text_tokens)
+        title_match = bool(tokenize_text(job.get("title"), job.get("team")) & tokenize_text(*title_hints))
+        location_match = bool(tokenize_text(job.get("location"), *(job.get("locations") or [])) & tokenize_text(*location_hints))
+
+        score = (
+            len(matched_skills) * 8
+            + len(matched_domains) * 6
+            + token_overlap * 2
+            + (10 if title_match else 0)
+            + (4 if location_match else 0)
+        )
+
+        if score <= 0:
+            continue
+
+        scored_jobs.append(
+            {
+                **job,
+                "matched_skills": matched_skills,
+                "matched_domains": matched_domains,
+                "recommendation_score": score,
+                "recommendation_reason": build_recommendation_reason(
+                    matched_skills=matched_skills,
+                    matched_domains=matched_domains,
+                    title_match=title_match,
+                    location_match=location_match,
+                ),
+            }
+        )
+
+    scored_jobs.sort(
+        key=lambda item: (
+            item.get("recommendation_score", 0),
+            item.get("posted_at") or "",
+            item.get("job_id") or "",
+        ),
+        reverse=True,
+    )
+
+    total = len(scored_jobs)
+    offset = (page - 1) * page_size
+    paged_jobs = scored_jobs[offset : offset + page_size]
+
+    with db_connect() as conn:
+        companies_all = fetch_company_options(conn)
+
+    return {
+        "jobs": [serialize_job(job) for job in paged_jobs],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "companies": companies_all,
+        "source": "recommendation",
+        "resume": serialize_resume(resume),
+        "profile": serialize_resume_profile(profile),
+    }
+
+
 def allowed_resume_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_RESUME_EXTENSIONS
 
@@ -585,6 +754,21 @@ def update_resume_failure(*, resume_id: int, message: str) -> None:
         conn.commit()
 
 
+def mark_resume_storage_deleted(*, resume_id: int, filename: str) -> None:
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE {RESUME_TABLE}
+                SET storage_path = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (f"deleted://{filename}", resume_id),
+            )
+        conn.commit()
+
+
 def upsert_resume_profile(*, resume_id: int, profile: dict[str, Any], metadata: dict[str, Any]) -> None:
     profile = sanitize_profile(profile)
     with db_connect() as conn:
@@ -724,6 +908,12 @@ def process_uploaded_resume(*, resume_id: int, storage_path: Path) -> tuple[dict
 
     profile, metadata = normalize_resume_with_llm(raw_text)
     upsert_resume_profile(resume_id=resume_id, profile=profile, metadata=metadata)
+    try:
+        if storage_path.exists():
+            storage_path.unlink()
+            mark_resume_storage_deleted(resume_id=resume_id, filename=storage_path.name)
+    except OSError:
+        logger.warning("Failed to delete processed resume file %s", storage_path)
 
     resume, saved_profile = fetch_resume_and_profile(resume_id=resume_id)
     return serialize_resume(resume), serialize_resume_profile(saved_profile)
@@ -765,6 +955,20 @@ def search_jobs():
     except Exception as exc:
         logger.exception("Failed to search jobs in Elasticsearch")
         return jsonify({"error": "failed_to_search_jobs", "message": str(exc)}), 500
+
+
+@app.get("/api/jobs/recommendations")
+def recommend_jobs():
+    page, page_size = get_page_args()
+    companies = get_companies_arg()
+
+    try:
+        return jsonify(recommend_jobs_from_resume(page=page, page_size=page_size, companies=companies))
+    except ValueError as exc:
+        return jsonify({"error": "resume_required", "message": str(exc)}), 404
+    except Exception as exc:
+        logger.exception("Failed to recommend jobs from resume")
+        return jsonify({"error": "failed_to_recommend_jobs", "message": str(exc)}), 500
 
 
 @app.get("/api/jobs/<job_id>")
@@ -879,14 +1083,18 @@ def delete_resume(resume_id: int):
     if not resume:
         return jsonify({"error": "resume_not_found"}), 404
 
-    storage_path = Path(resume["storage_path"])
+    storage_path_value = resume["storage_path"]
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM job_web_resumes WHERE id = %s", (resume_id,))
         conn.commit()
 
     try:
-        if storage_path.exists():
+        if storage_path_value and not str(storage_path_value).startswith("deleted://"):
+            storage_path = Path(storage_path_value)
+        else:
+            storage_path = None
+        if storage_path and storage_path.exists():
             storage_path.unlink()
     except OSError:
         logger.warning("Failed to delete resume file %s", storage_path)

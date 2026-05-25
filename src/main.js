@@ -1,4 +1,5 @@
 const state = {
+  activeTab: window.localStorage.getItem('job-web:active-tab') || 'search',
   draftKeyword: '',
   searchKeyword: '',
   selectedCompanies: [],
@@ -7,7 +8,6 @@ const state = {
   total: 0,
   page: 1,
   pageSize: 12,
-  hasResume: true,
   selectedJobId: null,
   selectedJob: null,
   loading: false,
@@ -38,7 +38,6 @@ function formatDate(value) {
   if (!value) {
     return '미정'
   }
-
   return new Date(value).toLocaleDateString('ko-KR')
 }
 
@@ -57,7 +56,6 @@ function formatYears(value) {
   if (value === null || value === undefined || value === '') {
     return '미정'
   }
-
   return `${value}년`
 }
 
@@ -67,9 +65,7 @@ function renderInlineChips(items, emptyLabel = '정보 없음') {
     return `<span class="inline-chip muted">${escapeHtml(emptyLabel)}</span>`
   }
 
-  return normalized
-    .map((item) => `<span class="inline-chip">${escapeHtml(item)}</span>`)
-    .join('')
+  return normalized.map((item) => `<span class="inline-chip">${escapeHtml(item)}</span>`).join('')
 }
 
 function jobSummary(job) {
@@ -84,7 +80,7 @@ function preferredItems(job) {
   return splitTextLines(job.preferred_qualifications)
 }
 
-function buildQuery() {
+function buildQuery({ includeKeyword = false } = {}) {
   const params = new URLSearchParams()
   params.set('page', String(state.page))
   params.set('page_size', String(state.pageSize))
@@ -93,7 +89,7 @@ function buildQuery() {
     params.append('company', company)
   })
 
-  if (state.searchKeyword.trim()) {
+  if (includeKeyword && state.searchKeyword.trim()) {
     params.set('q', state.searchKeyword.trim())
   }
 
@@ -117,16 +113,48 @@ async function requestJson(url, options = {}) {
   return response.json()
 }
 
+async function loadLatestResume() {
+  state.resumeLoading = true
+  state.resumeError = ''
+  render()
+
+  try {
+    const payload = await requestJson('/api/resumes/latest')
+    state.resume = payload.resume || null
+    state.resumeProfile = payload.profile || null
+  } catch (error) {
+    if (String(error.message).includes('404')) {
+      state.resume = null
+      state.resumeProfile = null
+    } else {
+      state.resumeError = error.message || '이력서 정보를 불러오지 못했습니다.'
+    }
+  } finally {
+    state.resumeLoading = false
+    render()
+  }
+}
+
 async function loadJobs() {
+  if (state.activeTab === 'update') {
+    render()
+    return
+  }
+
   state.loading = true
   state.error = ''
   render()
 
   try {
-    const query = buildQuery()
-    const endpoint = state.searchKeyword.trim() ? `/api/jobs/search?${query}` : `/api/jobs?${query}`
-    const payload = await requestJson(endpoint)
+    const query = buildQuery({ includeKeyword: state.activeTab === 'search' })
+    const endpoint =
+      state.activeTab === 'recommend'
+        ? `/api/jobs/recommendations?${query}`
+        : state.searchKeyword.trim()
+          ? `/api/jobs/search?${query}`
+          : `/api/jobs?${query}`
 
+    const payload = await requestJson(endpoint)
     state.jobs = payload.jobs || []
     state.total = payload.total || 0
     state.page = payload.page || 1
@@ -134,6 +162,13 @@ async function loadJobs() {
     state.companies = payload.companies || []
     state.source = payload.source || 'postgres'
     state.searchReady = payload.search_ready !== false
+
+    if (payload.resume) {
+      state.resume = payload.resume
+    }
+    if (payload.profile) {
+      state.resumeProfile = payload.profile
+    }
 
     if (state.selectedJobId && !state.jobs.some((job) => job.job_id === state.selectedJobId)) {
       state.selectedJobId = null
@@ -167,28 +202,6 @@ async function loadJobDetail(jobId) {
   }
 }
 
-async function loadLatestResume() {
-  state.resumeLoading = true
-  state.resumeError = ''
-  render()
-
-  try {
-    const payload = await requestJson('/api/resumes/latest')
-    state.resume = payload.resume || null
-    state.resumeProfile = payload.profile || null
-  } catch (error) {
-    if (String(error.message).includes('404')) {
-      state.resume = null
-      state.resumeProfile = null
-    } else {
-      state.resumeError = error.message || '이력서 정보를 불러오지 못했습니다.'
-    }
-  } finally {
-    state.resumeLoading = false
-    render()
-  }
-}
-
 async function uploadResume(file) {
   state.resumeUploading = true
   state.resumeError = ''
@@ -198,14 +211,15 @@ async function uploadResume(file) {
   try {
     const formData = new FormData()
     formData.append('file', file)
-    await requestJson('/api/resumes', {
+    const payload = await requestJson('/api/resumes', {
       method: 'POST',
       body: formData,
       headers: {},
     })
 
-    state.resumeSuccess = '이력서를 업로드하고 profile 추출까지 완료했습니다.'
-    await loadLatestResume()
+    state.resume = payload.resume || null
+    state.resumeProfile = payload.profile || null
+    state.resumeSuccess = '최신 이력서로 갱신했습니다. 처리 후 원본 파일은 서버에서 삭제됩니다.'
   } catch (error) {
     state.resumeError = error.message || '이력서 업로드에 실패했습니다.'
   } finally {
@@ -271,18 +285,28 @@ function renderJobs() {
                     </div>
                   </div>
                 </div>
+                ${
+                  job.recommendation_score
+                    ? `<span class="recommendation-badge">${escapeHtml(job.recommendation_score)}</span>`
+                    : ''
+                }
               </div>
               <p class="job-summary">${escapeHtml(jobSummary(job))}</p>
+              ${
+                job.recommendation_reason
+                  ? `<p class="job-reason">${escapeHtml(job.recommendation_reason)}</p>`
+                  : ''
+              }
               <div class="job-chip-row">
                 <span class="job-chip-label">Skills</span>
                 <div class="inline-chip-list">
-                  ${renderInlineChips(job.skills, '스킬 없음')}
+                  ${renderInlineChips(job.matched_skills?.length ? job.matched_skills : job.skills, '스킬 없음')}
                 </div>
               </div>
               <div class="job-chip-row">
                 <span class="job-chip-label">Domains</span>
                 <div class="inline-chip-list">
-                  ${renderInlineChips(job.domains, '도메인 없음')}
+                  ${renderInlineChips(job.matched_domains?.length ? job.matched_domains : job.domains, '도메인 없음')}
                 </div>
               </div>
             </button>
@@ -358,9 +382,9 @@ function renderResumePanel() {
     <section class="panel resume-panel">
       <div class="resume-hero">
         <div>
-          <p class="eyebrow">Resume</p>
-          <h2>이력서 업로드</h2>
-          <p class="panel-copy">DOCX 파일을 올리면 텍스트를 추출하고 구조화된 profile로 저장합니다.</p>
+          <p class="eyebrow">Resume Update</p>
+          <h2>이력서 업데이트</h2>
+          <p class="panel-copy">새 DOCX를 업로드하면 최신 이력서 profile로 갱신합니다. 처리 후 원본 파일은 서버에서 삭제합니다.</p>
         </div>
         <div class="resume-status ${resume ? 'has-data' : ''}">
           <span class="status-dot"></span>
@@ -374,7 +398,7 @@ function renderResumePanel() {
           <input type="file" accept=".docx" name="resume-file" ${state.resumeUploading ? 'disabled' : ''} />
         </label>
         <button class="primary-button" type="submit" ${state.resumeUploading ? 'disabled' : ''}>
-          ${state.resumeUploading ? '업로드 중...' : '이력서 업로드'}
+          ${state.resumeUploading ? '업로드 중...' : '최신 이력서로 업데이트'}
         </button>
       </form>
 
@@ -389,11 +413,7 @@ function renderResumePanel() {
 
       ${
         !resume && !state.resumeLoading
-          ? `
-            <div class="resume-placeholder">
-              아직 업로드된 이력서가 없습니다. 먼저 DOCX 파일을 올려 주세요.
-            </div>
-          `
+          ? '<div class="resume-placeholder">아직 업로드된 이력서가 없습니다. 먼저 DOCX 파일을 올려 주세요.</div>'
           : ''
       }
 
@@ -414,8 +434,8 @@ function renderResumePanel() {
                 <p>${formatDate(resume.created_at)}</p>
               </div>
               <div class="meta-card">
-                <p class="detail-label">추출 상태</p>
-                <p>${escapeHtml(resume.status || 'uploaded')}</p>
+                <p class="detail-label">저장 상태</p>
+                <p>${escapeHtml(resume.storage_path || 'deleted')}</p>
               </div>
             </div>
           `
@@ -490,6 +510,170 @@ function renderResumePanel() {
   `
 }
 
+function renderNavigation() {
+  const items = [
+    ['search', '검색'],
+    ['recommend', '추천'],
+    ['update', '이력서 업데이트'],
+  ]
+
+  return `
+    <nav class="top-nav panel">
+      <div class="nav-brand">
+        <p class="eyebrow">Job Web</p>
+        <h1>채용 탐색</h1>
+      </div>
+      <div class="nav-tabs">
+        ${items
+          .map(
+            ([id, label]) => `
+              <button class="nav-tab ${state.activeTab === id ? 'active' : ''}" type="button" data-tab="${id}">
+                ${label}
+              </button>
+            `,
+          )
+          .join('')}
+      </div>
+    </nav>
+  `
+}
+
+function renderSearchPanel() {
+  return `
+    <aside class="panel search-panel">
+      <div class="panel-header">
+        <p class="eyebrow">Search</p>
+        <h2>키워드와 필터</h2>
+        <p class="panel-copy">검색은 키워드와 회사 필터만 사용합니다.</p>
+      </div>
+
+      <label class="field">
+        <span class="field-label">검색어</span>
+        <input class="text-input" type="text" placeholder="회사, 팀, 스킬, 키워드" value="${escapeHtml(state.draftKeyword)}" />
+      </label>
+
+      <div class="field">
+        <div class="field-row">
+          <span class="field-label">회사 필터</span>
+          <span class="field-meta">${state.companies.length}개</span>
+        </div>
+        <div class="checkbox-list">
+          ${renderCompanyOptions()}
+        </div>
+      </div>
+
+      <div class="panel-actions">
+        <button class="primary-button" type="button" data-search>검색</button>
+        <button class="secondary-button" type="button" data-reset>초기화</button>
+      </div>
+    </aside>
+  `
+}
+
+function renderRecommendationPanel() {
+  const profile = state.resumeProfile
+  const resume = state.resume
+
+  if (!profile) {
+    return `
+      <aside class="panel search-panel">
+        <div class="panel-header">
+          <p class="eyebrow">Recommend</p>
+          <h2>이력서 기반 추천</h2>
+          <p class="panel-copy">최신 이력서를 바탕으로 공고를 추천합니다.</p>
+        </div>
+        <div class="resume-placeholder">
+          추천을 사용하려면 먼저 최신 이력서를 업로드해 주세요.
+        </div>
+        <div class="panel-actions">
+          <button class="primary-button" type="button" data-tab-jump="update">이력서 업데이트로 이동</button>
+        </div>
+      </aside>
+    `
+  }
+
+  return `
+    <aside class="panel search-panel">
+      <div class="panel-header">
+        <p class="eyebrow">Recommend</p>
+        <h2>이력서 기반 추천</h2>
+        <p class="panel-copy">최신 이력서 profile과 공고 필드를 비교해서 우선순위를 정합니다.</p>
+      </div>
+
+      <section class="recommend-summary">
+        <p class="detail-label">최근 이력서</p>
+        <h3>${escapeHtml(profile.candidate_name || resume?.filename || '최근 이력서')}</h3>
+        <p class="recommend-copy">${escapeHtml(profile.summary || '요약이 아직 없습니다.')}</p>
+      </section>
+
+      <section class="field">
+        <div class="field-row">
+          <span class="field-label">핵심 Skills</span>
+          <span class="field-meta">${normalizeList(profile.skills).length}개</span>
+        </div>
+        ${renderTagList(normalizeList(profile.skills))}
+      </section>
+
+      <section class="field">
+        <div class="field-row">
+          <span class="field-label">핵심 Domains</span>
+          <span class="field-meta">${normalizeList(profile.domains).length}개</span>
+        </div>
+        ${renderTagList(normalizeList(profile.domains))}
+      </section>
+
+      <div class="field">
+        <div class="field-row">
+          <span class="field-label">회사 필터</span>
+          <span class="field-meta">${state.companies.length}개</span>
+        </div>
+        <div class="checkbox-list">
+          ${renderCompanyOptions()}
+        </div>
+      </div>
+
+      <div class="panel-actions">
+        <button class="primary-button" type="button" data-recommend-refresh>추천 새로고침</button>
+        <button class="secondary-button" type="button" data-tab-jump="update">이력서 갱신</button>
+      </div>
+    </aside>
+  `
+}
+
+function renderResultsPanel() {
+  const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize))
+  const eyebrow =
+    state.activeTab === 'recommend'
+      ? 'Resume Recommendation'
+      : state.source === 'elasticsearch'
+        ? 'Elasticsearch Search'
+        : 'PostgreSQL Listing'
+  const title = state.activeTab === 'recommend' ? '추천 공고' : '검색 결과'
+
+  return `
+    <section class="panel results-panel">
+      <div class="results-header">
+        <div>
+          <p class="eyebrow">${eyebrow}</p>
+          <h2>${title}</h2>
+        </div>
+        <p class="results-meta">총 ${state.total}건</p>
+      </div>
+
+      ${state.error ? `<div class="results-state">${escapeHtml(state.error)}</div>` : ''}
+      ${state.activeTab === 'search' && !state.searchReady ? '<div class="results-state">검색 인덱스가 아직 준비되지 않아 빈 결과를 표시하고 있습니다.</div>' : ''}
+
+      ${renderJobs()}
+
+      <div class="pagination">
+        <button class="secondary-button" type="button" data-page="prev" ${state.page <= 1 ? 'disabled' : ''}>이전</button>
+        <span class="page-indicator">${state.page} / ${totalPages}</span>
+        <button class="secondary-button" type="button" data-page="next" ${state.page >= totalPages ? 'disabled' : ''}>다음</button>
+      </div>
+    </section>
+  `
+}
+
 function renderDrawer() {
   const job = state.selectedJob
 
@@ -556,7 +740,7 @@ function renderDrawer() {
             </div>
             <div>
               <p class="detail-label">팀</p>
-              <p>${escapeHtml(job.team || job.level_guess || '미정')}</p>
+              <p>${escapeHtml(job.display_team || '미정')}</p>
             </div>
             <div>
               <p class="detail-label">게시일</p>
@@ -565,7 +749,7 @@ function renderDrawer() {
           </div>
 
           <section class="detail-section">
-            <p class="detail-label">설명</p>
+            <p class="detail-label">요약</p>
             <p>${escapeHtml(jobSummary(job))}</p>
           </section>
 
@@ -606,77 +790,27 @@ function renderDrawer() {
   `
 }
 
-function render() {
-  const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize))
+function renderMainContent() {
+  if (state.activeTab === 'update') {
+    return renderResumePanel()
+  }
 
+  return `
+    <div class="layout">
+      ${state.activeTab === 'recommend' ? renderRecommendationPanel() : renderSearchPanel()}
+      ${renderResultsPanel()}
+    </div>
+  `
+}
+
+function render() {
   root.innerHTML = `
     <div class="app-shell">
       <div class="ambient ambient-left"></div>
       <div class="ambient ambient-right"></div>
       <main class="page-stack">
-        ${renderResumePanel()}
-
-        <div class="layout">
-          <aside class="panel search-panel">
-            <div class="panel-header">
-              <p class="eyebrow">Search</p>
-              <h1>Job Finder</h1>
-              <p class="panel-copy">PostgreSQL 목록과 Elasticsearch 검색 결과를 하나의 화면에서 확인합니다.</p>
-            </div>
-
-            <label class="field">
-              <span class="field-label">검색어</span>
-              <input class="text-input" type="text" placeholder="회사, 팀, 스킬, 키워드" value="${escapeHtml(state.draftKeyword)}" />
-            </label>
-
-            <div class="field">
-              <div class="field-row">
-                <span class="field-label">정렬 상태</span>
-                <span class="field-meta">${state.searchKeyword.trim() ? 'Elasticsearch 검색' : 'PostgreSQL 목록'}</span>
-              </div>
-              <div class="toggle-row">
-                <button class="toggle-chip ${state.hasResume ? 'active' : ''}" type="button" data-resume="true">검색 사용</button>
-                <button class="toggle-chip ${!state.hasResume ? 'active' : ''}" type="button" data-resume="false">목록만 보기</button>
-              </div>
-            </div>
-
-            <div class="field">
-              <div class="field-row">
-                <span class="field-label">회사 필터</span>
-                <span class="field-meta">${state.companies.length}개</span>
-              </div>
-              <div class="checkbox-list">
-                ${renderCompanyOptions()}
-              </div>
-            </div>
-
-            <div class="panel-actions">
-              <button class="primary-button" type="button" data-search>검색</button>
-              <button class="secondary-button" type="button" data-reset>초기화</button>
-            </div>
-          </aside>
-
-          <section class="panel results-panel">
-            <div class="results-header">
-              <div>
-                <p class="eyebrow">${state.source === 'elasticsearch' ? 'Elasticsearch Search' : 'PostgreSQL Listing'}</p>
-                <h2>검색 결과</h2>
-              </div>
-              <p class="results-meta">총 ${state.total}건</p>
-            </div>
-
-            ${state.error ? `<div class="results-state">${escapeHtml(state.error)}</div>` : ''}
-            ${!state.searchReady ? '<div class="results-state">검색 인덱스가 아직 준비되지 않아 빈 결과를 표시하고 있습니다.</div>' : ''}
-
-            ${renderJobs()}
-
-            <div class="pagination">
-              <button class="secondary-button" type="button" data-page="prev" ${state.page <= 1 ? 'disabled' : ''}>이전</button>
-              <span class="page-indicator">${state.page} / ${totalPages}</span>
-              <button class="secondary-button" type="button" data-page="next" ${state.page >= totalPages ? 'disabled' : ''}>다음</button>
-            </div>
-          </section>
-        </div>
+        ${renderNavigation()}
+        ${renderMainContent()}
       </main>
       ${renderDrawer()}
     </div>
@@ -686,7 +820,7 @@ function render() {
 }
 
 function executeSearch() {
-  state.searchKeyword = state.hasResume ? state.draftKeyword.trim() : ''
+  state.searchKeyword = state.draftKeyword.trim()
   state.page = 1
   state.selectedJobId = null
   state.selectedJob = null
@@ -697,9 +831,30 @@ function resetSearch() {
   state.draftKeyword = ''
   state.searchKeyword = ''
   state.selectedCompanies = []
+  state.page = 1
   state.selectedJobId = null
   state.selectedJob = null
+  loadJobs()
+}
+
+function switchTab(nextTab) {
+  if (!nextTab || nextTab === state.activeTab) {
+    return
+  }
+
+  state.activeTab = nextTab
   state.page = 1
+  state.selectedJobId = null
+  state.selectedJob = null
+  state.error = ''
+  window.localStorage.setItem('job-web:active-tab', nextTab)
+
+  render()
+
+  if (nextTab === 'update') {
+    return
+  }
+
   loadJobs()
 }
 
@@ -707,12 +862,14 @@ function bindEvents() {
   const keywordInput = root.querySelector('.text-input')
   const searchButton = root.querySelector('[data-search]')
   const resetButton = root.querySelector('[data-reset]')
+  const refreshButton = root.querySelector('[data-recommend-refresh]')
   const pageButtons = root.querySelectorAll('[data-page]')
   const companyCheckboxes = root.querySelectorAll('input[data-company]')
   const jobButtons = root.querySelectorAll('[data-job-id]')
   const closeButtons = root.querySelectorAll('[data-close-drawer]')
-  const resumeButtons = root.querySelectorAll('[data-resume]')
   const resumeForm = root.querySelector('[data-resume-form]')
+  const tabButtons = root.querySelectorAll('[data-tab]')
+  const tabJumpButtons = root.querySelectorAll('[data-tab-jump]')
 
   keywordInput?.addEventListener('input', (event) => {
     state.draftKeyword = event.target.value
@@ -726,6 +883,22 @@ function bindEvents() {
 
   searchButton?.addEventListener('click', executeSearch)
   resetButton?.addEventListener('click', resetSearch)
+  refreshButton?.addEventListener('click', () => {
+    state.page = 1
+    loadJobs()
+  })
+
+  tabButtons.forEach((button) => {
+    button.addEventListener('click', (event) => {
+      switchTab(event.currentTarget.dataset.tab)
+    })
+  })
+
+  tabJumpButtons.forEach((button) => {
+    button.addEventListener('click', (event) => {
+      switchTab(event.currentTarget.dataset.tabJump)
+    })
+  })
 
   companyCheckboxes.forEach((checkbox) => {
     checkbox.addEventListener('change', (event) => {
@@ -739,17 +912,6 @@ function bindEvents() {
       } else {
         state.selectedCompanies = [...state.selectedCompanies, company]
       }
-    })
-  })
-
-  resumeButtons.forEach((button) => {
-    button.addEventListener('click', (event) => {
-      state.hasResume = event.currentTarget.dataset.resume === 'true'
-      window.localStorage.setItem('job-web:resume', String(state.hasResume))
-      if (!state.hasResume) {
-        state.searchKeyword = ''
-      }
-      render()
     })
   })
 
@@ -807,7 +969,9 @@ function bindEvents() {
   })
 }
 
-state.hasResume = window.localStorage.getItem('job-web:resume') !== 'false'
 render()
-loadJobs()
-loadLatestResume()
+loadLatestResume().then(() => {
+  if (state.activeTab !== 'update') {
+    loadJobs()
+  }
+})
