@@ -106,6 +106,8 @@ const state = {
   source: 'postgres',
   resume: null,
   resumeProfile: null,
+  recommendationReady: false,
+  recommendationMessage: '',
   resumeLoading: false,
   resumeUploading: false,
   resumeError: '',
@@ -343,6 +345,18 @@ function formatYears(value) {
   return `${value}년`
 }
 
+function resumeFilename(resume) {
+  return resume?.filename || resume?.label || '최근 이력서'
+}
+
+function resumeStatusLabel(resume) {
+  return resume?.status_label || '상태 확인 중'
+}
+
+function recommendationStatusLabel(resume) {
+  return resume?.recommendation_ready ? '추천 준비 완료' : '추천 준비 중'
+}
+
 function renderHomeLink(extraClass = '') {
   const className = ['home-link', 'icon-button', extraClass].filter(Boolean).join(' ')
 
@@ -420,10 +434,14 @@ async function loadLatestResume() {
     const payload = await requestJson('/api/resumes/latest')
     state.resume = payload.resume || null
     state.resumeProfile = payload.profile || null
+    state.recommendationReady = payload.recommendation_ready === true
+    state.recommendationMessage = payload.message || ''
   } catch (error) {
     if (String(error.message).includes('404')) {
       state.resume = null
       state.resumeProfile = null
+      state.recommendationReady = false
+      state.recommendationMessage = ''
     } else {
       state.resumeError = error.message || '이력서 정보를 불러오지 못했습니다.'
     }
@@ -435,15 +453,6 @@ async function loadLatestResume() {
 
 async function loadJobs() {
   if (state.activeTab === 'update') {
-    render()
-    return
-  }
-
-  if (state.activeTab === 'recommend' && !state.resumeProfile) {
-    state.jobs = []
-    state.total = 0
-    state.error = ''
-    state.loading = false
     render()
     return
   }
@@ -476,6 +485,12 @@ async function loadJobs() {
     if (payload.profile) {
       state.resumeProfile = payload.profile
     }
+    if (Object.prototype.hasOwnProperty.call(payload, 'recommendation_ready')) {
+      state.recommendationReady = payload.recommendation_ready === true
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'message')) {
+      state.recommendationMessage = payload.message || ''
+    }
 
     if (state.selectedJobId && !state.jobs.some((job) => job.job_id === state.selectedJobId)) {
       state.selectedJobId = null
@@ -485,6 +500,9 @@ async function loadJobs() {
     state.jobs = []
     state.total = 0
     state.error = error.message || '데이터를 불러오지 못했습니다.'
+    if (state.activeTab === 'recommend') {
+      state.recommendationReady = false
+    }
   } finally {
     state.loading = false
     render()
@@ -526,7 +544,9 @@ async function uploadResume(file) {
 
     state.resume = payload.resume || null
     state.resumeProfile = payload.profile || null
-    state.resumeSuccess = '최신 이력서로 갱신했습니다. 처리 후 원본 파일은 서버에서 삭제됩니다.'
+    state.recommendationReady = payload.recommendation_ready === true
+    state.recommendationMessage = payload.message || ''
+    state.resumeSuccess = '이력서를 업로드했습니다. Airflow에서 추출, 임베딩, 추천 생성을 순서대로 진행합니다.'
   } catch (error) {
     state.resumeError = error.message || '이력서 업로드에 실패했습니다.'
   } finally {
@@ -557,12 +577,16 @@ function renderCompanyOptions() {
 }
 
 function renderJobs() {
-  if (state.activeTab === 'recommend' && !state.resumeProfile) {
+  if (state.loading) {
+    return '<div class="results-state">공고를 불러오는 중입니다.</div>'
+  }
+
+  if (state.activeTab === 'recommend' && !state.resume) {
     return `<div class="results-state">${state.isMobile ? '추천은 데스크탑에서 최신 이력서를 등록한 뒤 사용할 수 있습니다.' : '추천을 사용하려면 최신 이력서를 먼저 등록해 주세요.'}</div>`
   }
 
-  if (state.loading) {
-    return '<div class="results-state">공고를 불러오는 중입니다.</div>'
+  if (state.activeTab === 'recommend' && !state.recommendationReady) {
+    return `<div class="results-state">${escapeHtml(state.recommendationMessage || '이력서 추천을 준비 중입니다.')}</div>`
   }
 
   if (state.jobs.length === 0) {
@@ -662,6 +686,8 @@ function renderProjects(items) {
 function renderResumePanel() {
   const profile = state.resumeProfile
   const resume = state.resume
+  const profileSkills = normalizeList(profile?.skills)
+  const profileSummary = profile?.summary || ''
 
   return `
     <section class="panel resume-panel">
@@ -669,11 +695,11 @@ function renderResumePanel() {
         <div>
           <p class="eyebrow">Resume Update</p>
           <h2>이력서 업데이트</h2>
-          <p class="panel-copy">새 DOCX를 업로드하면 최신 이력서 profile로 갱신합니다. 처리 후 원본 파일은 서버에서 삭제합니다.</p>
+          <p class="panel-copy">새 DOCX를 업로드하면 Airflow에서 텍스트 추출, 임베딩, 추천 생성을 순서대로 진행합니다.</p>
         </div>
         <div class="resume-status ${resume ? 'has-data' : ''}">
           <span class="status-dot"></span>
-          <span>${resume ? escapeHtml(resume.status || 'normalized') : '미등록'}</span>
+          <span>${resume ? escapeHtml(resumeStatusLabel(resume)) : '미등록'}</span>
         </div>
       </div>
 
@@ -708,22 +734,28 @@ function renderResumePanel() {
             <div class="resume-meta-grid">
               <div class="meta-card">
                 <p class="detail-label">파일명</p>
-                <p>${escapeHtml(resume.filename)}</p>
+                <p>${escapeHtml(resumeFilename(resume))}</p>
               </div>
               <div class="meta-card">
-                <p class="detail-label">정제 방식</p>
-                <p>${escapeHtml(resume.normalization_method || 'unknown')}</p>
+                <p class="detail-label">처리 상태</p>
+                <p>${escapeHtml(resumeStatusLabel(resume))}</p>
               </div>
               <div class="meta-card">
                 <p class="detail-label">업로드 시각</p>
-                <p>${formatDate(resume.created_at)}</p>
+                <p>${formatDate(resume.uploaded_at || resume.created_at)}</p>
               </div>
               <div class="meta-card">
-                <p class="detail-label">저장 상태</p>
-                <p>${escapeHtml(resume.storage_path || 'deleted')}</p>
+                <p class="detail-label">추천 상태</p>
+                <p>${escapeHtml(recommendationStatusLabel(resume))}</p>
               </div>
             </div>
           `
+          : ''
+      }
+
+      ${
+        resume && !profile && !state.resumeLoading
+          ? `<div class="resume-placeholder">${escapeHtml(state.recommendationMessage || '이력서 업로드 후 Airflow에서 추천 데이터를 준비합니다.')}</div>`
           : ''
       }
 
@@ -733,60 +765,23 @@ function renderResumePanel() {
             <div class="resume-profile-grid">
               <section class="profile-card profile-card-main">
                 <p class="eyebrow">Profile</p>
-                <h3>${escapeHtml(profile.candidate_name || '이름 미확인')}</h3>
-                <p class="profile-title">${escapeHtml(profile.current_title || '현재 직함 정보 없음')}</p>
-                <p class="profile-summary">${escapeHtml(profile.summary || '요약이 아직 없습니다.')}</p>
-                <div class="profile-stats">
-                  <div>
-                    <span class="detail-label">경력</span>
-                    <strong>${formatYears(profile.years_of_experience)}</strong>
-                  </div>
-                  <div>
-                    <span class="detail-label">시니어리티</span>
-                    <strong>${escapeHtml(profile.seniority || '미정')}</strong>
-                  </div>
-                </div>
+                <h3>${escapeHtml(resumeFilename(resume))}</h3>
+                <p class="profile-summary">${escapeHtml(profileSummary || '요약이 아직 없습니다.')}</p>
               </section>
 
-              <section class="profile-card">
-                <div class="field-row">
-                  <span class="field-label">Skills</span>
-                  <span class="field-meta">${normalizeList(profile.skills).length}개</span>
-                </div>
-                ${renderTagList(normalizeList(profile.skills))}
-              </section>
-
-              <section class="profile-card">
-                <div class="field-row">
-                  <span class="field-label">Domains</span>
-                  <span class="field-meta">${normalizeList(profile.domains).length}개</span>
-                </div>
-                ${renderTagList(normalizeList(profile.domains))}
-              </section>
-
-              <section class="profile-card">
-                <div class="field-row">
-                  <span class="field-label">Locations</span>
-                  <span class="field-meta">${normalizeList(profile.locations).length}개</span>
-                </div>
-                ${renderTagList(normalizeList(profile.locations))}
-              </section>
-
-              <section class="profile-card">
-                <div class="field-row">
-                  <span class="field-label">경력 요약</span>
-                  <span class="field-meta">${normalizeList(profile.experience_items).length}개</span>
-                </div>
-                ${renderExperienceList(normalizeList(profile.experience_items))}
-              </section>
-
-              <section class="profile-card">
-                <div class="field-row">
-                  <span class="field-label">프로젝트</span>
-                  <span class="field-meta">${normalizeList(profile.projects).length}개</span>
-                </div>
-                ${renderProjects(normalizeList(profile.projects))}
-              </section>
+              ${
+                profileSkills.length
+                  ? `
+                    <section class="profile-card">
+                      <div class="field-row">
+                        <span class="field-label">Skills</span>
+                        <span class="field-meta">${profileSkills.length}개</span>
+                      </div>
+                      ${renderTagList(profileSkills)}
+                    </section>
+                  `
+                  : ''
+              }
             </div>
           `
           : ''
@@ -874,8 +869,10 @@ function renderSearchPanel() {
 function renderRecommendationControls({ mobile = false } = {}) {
   const profile = state.resumeProfile
   const resume = state.resume
+  const profileSkills = normalizeList(profile?.skills)
+  const summary = profile?.summary || '업로드된 최신 이력서를 기준으로 추천을 생성합니다.'
 
-  if (!profile) {
+  if (!resume) {
     return `
       <div class="control-stack">
         <div class="resume-placeholder">
@@ -898,25 +895,33 @@ function renderRecommendationControls({ mobile = false } = {}) {
     <div class="control-stack">
       <section class="recommend-summary">
         <p class="detail-label">최근 이력서</p>
-        <h3>${escapeHtml(profile.candidate_name || resume?.filename || '최근 이력서')}</h3>
-        <p class="recommend-copy">${escapeHtml(profile.summary || '요약이 아직 없습니다.')}</p>
+        <h3>${escapeHtml(resumeFilename(resume))}</h3>
+        <p class="recommend-copy">${escapeHtml(summary)}</p>
+        <div class="tag-list">
+          <span class="tag-chip">${escapeHtml(resumeStatusLabel(resume))}</span>
+          <span class="tag-chip">${escapeHtml(recommendationStatusLabel(resume))}</span>
+        </div>
       </section>
 
-      <section class="field">
-        <div class="field-row">
-          <span class="field-label">핵심 Skills</span>
-          <span class="field-meta">${normalizeList(profile.skills).length}개</span>
-        </div>
-        ${renderTagList(normalizeList(profile.skills))}
-      </section>
+      ${
+        profileSkills.length
+          ? `
+            <section class="field">
+              <div class="field-row">
+                <span class="field-label">핵심 Skills</span>
+                <span class="field-meta">${profileSkills.length}개</span>
+              </div>
+              ${renderTagList(profileSkills)}
+            </section>
+          `
+          : ''
+      }
 
-      <section class="field">
-        <div class="field-row">
-          <span class="field-label">핵심 Domains</span>
-          <span class="field-meta">${normalizeList(profile.domains).length}개</span>
-        </div>
-        ${renderTagList(normalizeList(profile.domains))}
-      </section>
+      ${
+        state.recommendationMessage
+          ? `<div class="resume-placeholder">${escapeHtml(state.recommendationMessage)}</div>`
+          : ''
+      }
 
       <div class="field">
         <div class="field-row">

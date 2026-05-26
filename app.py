@@ -1,15 +1,18 @@
-import json
+import io
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
 import requests
-from docx import Document
 from flask import Flask, jsonify, request, send_from_directory
+from minio import Minio
+from minio.error import S3Error
+from requests.auth import HTTPBasicAuth
 from werkzeug.utils import secure_filename
 
 
@@ -18,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 DIST_DIR = BASE_DIR / "dist"
-RESUME_STORAGE_DIR = Path(os.environ.get("RESUME_STORAGE_DIR", "/data/resumes"))
 
 app = Flask(__name__, static_folder=str(DIST_DIR), static_url_path="")
 
@@ -32,17 +34,27 @@ PG_CONFIG = {
 
 ES_HOST = os.environ.get("ES_HOST", "http://elasticsearch-service.default.svc.cluster.local:9200").rstrip("/")
 ES_INDEX = os.environ.get("ES_INDEX", "job_recommender_jobs")
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "").rstrip("/")
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
-LLM_MODEL = os.environ.get("LLM_MODEL", "")
+MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", os.environ.get("COMMUNITY_MINIO_ENDPOINT", "minio.minio.svc.cluster.local:9000"))
+MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", os.environ.get("COMMUNITY_MINIO_ACCESS_KEY", ""))
+MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", os.environ.get("COMMUNITY_MINIO_SECRET_KEY", ""))
+MINIO_SECURE = os.environ.get("MINIO_SECURE", os.environ.get("COMMUNITY_MINIO_SECURE", "false")).lower() == "true"
+RESUME_BUCKET = os.environ.get("JOB_RECOMMENDER_RESUME_MINIO_BUCKET", "job-recommender-resumes")
+AIRFLOW_API_BASE_URL = os.environ.get("AIRFLOW_API_BASE_URL", "").rstrip("/")
+AIRFLOW_API_USERNAME = os.environ.get("AIRFLOW_API_USERNAME", "")
+AIRFLOW_API_PASSWORD = os.environ.get("AIRFLOW_API_PASSWORD", "")
+AIRFLOW_DAG_ID = os.environ.get("AIRFLOW_RESUME_DAG_ID", "job_recommender_resume")
 
 DEFAULT_PAGE_SIZE = 12
 MAX_PAGE_SIZE = 50
 ALLOWED_RESUME_EXTENSIONS = {".docx"}
-
-RESUME_TABLE = "job_web_resumes"
-RESUME_PROFILE_TABLE = "job_web_resume_profiles"
 RESUME_SCHEMA_PATH = BASE_DIR / "migrations" / "001_create_job_web_resume_tables.sql"
+
+RESUME_STATUS_LABELS = {
+    "queued": "대기 중",
+    "processing": "처리 중",
+    "ready": "추천 준비 완료",
+    "pending": "미등록",
+}
 
 
 def get_page_args() -> tuple[int, int]:
@@ -64,7 +76,6 @@ def db_connect():
 
 
 def ensure_runtime_state() -> None:
-    RESUME_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(RESUME_SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -90,15 +101,6 @@ def company_mark(company: str | None) -> str:
     return f"{words[0][0]}{words[1][0]}".upper()
 
 
-def tokenize_text(*parts: Any) -> set[str]:
-    tokens: set[str] = set()
-    for part in parts:
-        value = str(part or "").lower()
-        for token in re.findall(r"[a-z0-9+#.-]{2,}", value):
-            tokens.add(token)
-    return tokens
-
-
 def normalize_string_list(items: Any) -> list[str]:
     values: list[str] = []
     for item in items or []:
@@ -106,6 +108,53 @@ def normalize_string_list(items: Any) -> list[str]:
         if value:
             values.append(value)
     return values
+
+
+def format_recommendation_score(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    if -1.0 <= score <= 1.0:
+        return str(int(round(score * 100)))
+    return str(int(round(score)))
+
+
+def serialize_datetime(value: Any) -> str | None:
+    if not value:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def derive_resume_status(row: dict[str, Any]) -> str:
+    if int(row.get("recommendation_count") or 0) > 0:
+        return "ready"
+    if row.get("content_embedding") or row.get("raw_text"):
+        return "processing"
+    if row.get("minio_key"):
+        return "queued"
+    return "pending"
+
+
+def build_resume_message(row: dict[str, Any] | None) -> str | None:
+    if not row:
+        return None
+
+    if int(row.get("recommendation_count") or 0) > 0:
+        return None
+    if not row.get("minio_key"):
+        return "이력서를 먼저 업로드해 주세요."
+    if not row.get("raw_text"):
+        return "이력서 업로드가 완료되었습니다. Airflow에서 텍스트 추출을 진행 중입니다."
+    if not row.get("content_embedding"):
+        return "이력서 텍스트 추출이 끝났고 임베딩을 생성 중입니다."
+    return "추천 결과를 생성 중입니다."
 
 
 def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
@@ -137,14 +186,14 @@ def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
         "domains": row.get("domains") or [],
         "matched_skills": row.get("matched_skills") or [],
         "matched_domains": row.get("matched_domains") or [],
-        "recommendation_score": row.get("recommendation_score"),
+        "recommendation_score": format_recommendation_score(row.get("recommendation_score")),
         "recommendation_reason": row.get("recommendation_reason"),
         "url": row.get("url"),
-        "posted_at": row.get("posted_at").isoformat() if row.get("posted_at") else None,
-        "first_seen_at": row.get("first_seen_at").isoformat() if row.get("first_seen_at") else None,
-        "last_seen_at": row.get("last_seen_at").isoformat() if row.get("last_seen_at") else None,
+        "posted_at": serialize_datetime(row.get("posted_at")),
+        "first_seen_at": serialize_datetime(row.get("first_seen_at")),
+        "last_seen_at": serialize_datetime(row.get("last_seen_at")),
         "is_active": row.get("is_active", True),
-        "detail_extracted_at": row.get("detail_extracted_at").isoformat() if row.get("detail_extracted_at") else None,
+        "detail_extracted_at": serialize_datetime(row.get("detail_extracted_at")),
     }
 
 
@@ -152,20 +201,19 @@ def serialize_resume(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if not row:
         return None
 
+    status = derive_resume_status(row)
     return {
         "id": row.get("id"),
-        "filename": row.get("filename"),
-        "content_type": row.get("content_type"),
-        "storage_path": row.get("storage_path"),
-        "file_size_bytes": row.get("file_size_bytes"),
-        "status": row.get("status"),
-        "raw_text": row.get("raw_text"),
-        "extract_error": row.get("extract_error"),
-        "llm_model": row.get("llm_model"),
-        "normalization_method": row.get("normalization_method"),
-        "normalized_at": row.get("normalized_at").isoformat() if row.get("normalized_at") else None,
-        "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
-        "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+        "label": row.get("label"),
+        "filename": row.get("label"),
+        "status": status,
+        "status_label": RESUME_STATUS_LABELS.get(status, status),
+        "minio_key": row.get("minio_key"),
+        "uploaded_at": serialize_datetime(row.get("uploaded_at")),
+        "created_at": serialize_datetime(row.get("uploaded_at")),
+        "recommendation_ready": int(row.get("recommendation_count") or 0) > 0,
+        "recommendation_count": int(row.get("recommendation_count") or 0),
+        "last_ranked_at": serialize_datetime(row.get("latest_ranked_at")),
     }
 
 
@@ -173,30 +221,20 @@ def serialize_resume_profile(row: dict[str, Any] | None) -> dict[str, Any] | Non
     if not row:
         return None
 
+    summary = summarize_text(row.get("summary"), limit=420)
+    skills = normalize_string_list(row.get("skills"))
+    if not summary and not skills:
+        return None
+
     return {
-        "resume_id": row.get("resume_id"),
-        "candidate_name": row.get("candidate_name"),
-        "summary": row.get("summary"),
-        "years_of_experience": float(row["years_of_experience"]) if row.get("years_of_experience") is not None else None,
-        "current_title": row.get("current_title"),
-        "seniority": row.get("seniority"),
-        "locations": row.get("locations") or [],
-        "skills": row.get("skills") or [],
-        "domains": row.get("domains") or [],
-        "companies": row.get("companies") or [],
-        "roles": row.get("roles") or [],
-        "preferred_job_titles": row.get("preferred_job_titles") or [],
-        "preferred_locations": row.get("preferred_locations") or [],
-        "team_keywords": row.get("team_keywords") or [],
-        "responsibility_keywords": row.get("responsibility_keywords") or [],
-        "qualification_keywords": row.get("qualification_keywords") or [],
-        "education": row.get("education") or [],
-        "certifications": row.get("certifications") or [],
-        "projects": row.get("projects") or [],
-        "experience_items": row.get("experience_items") or [],
-        "raw_profile_json": row.get("raw_profile_json") or {},
-        "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
-        "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+        "resume_id": row.get("id"),
+        "candidate_name": None,
+        "summary": summary,
+        "skills": skills,
+        "domains": [],
+        "locations": [],
+        "experience_items": [],
+        "projects": [],
     }
 
 
@@ -376,494 +414,12 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
     }
 
 
-def fetch_jobs_for_recommendation(*, companies: list[str]) -> list[dict[str, Any]]:
-    filters = ["is_active = TRUE"]
-    params: list[Any] = []
-
-    if companies:
-        filters.append("company = ANY(%s)")
-        params.append(companies)
-
-    where_clause = " AND ".join(filters)
-
-    with db_connect() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                f"""
-                SELECT
-                    job_id,
-                    company,
-                    title,
-                    locations,
-                    level_guess,
-                    team,
-                    raw_description,
-                    team_description,
-                    responsibilities,
-                    minimum_qualifications,
-                    preferred_qualifications,
-                    skills,
-                    domains,
-                    url,
-                    posted_at,
-                    first_seen_at,
-                    last_seen_at,
-                    is_active,
-                    detail_extracted_at
-                FROM jobs
-                WHERE {where_clause}
-                ORDER BY posted_at DESC NULLS LAST, last_seen_at DESC, job_id ASC
-                LIMIT 500
-                """,
-                params,
-            )
-            return [dict(row) for row in cur.fetchall()]
-
-
-def build_recommendation_reason(*, matched_skills: list[str], matched_domains: list[str], title_match: bool, location_match: bool) -> str:
-    reasons: list[str] = []
-    if matched_skills:
-        reasons.append(f"skills {', '.join(matched_skills[:3])}")
-    if matched_domains:
-        reasons.append(f"domains {', '.join(matched_domains[:2])}")
-    if title_match:
-        reasons.append("title overlap")
-    if location_match:
-        reasons.append("location match")
-    return ", ".join(reasons) if reasons else "profile similarity"
-
-
-def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str]) -> dict[str, Any]:
-    resume, profile = fetch_resume_and_profile(latest=True)
-    if not resume or not profile:
-        raise ValueError("A processed resume is required before recommendations are available.")
-
-    profile_skills = dedupe_text_items(profile.get("skills", []))
-    profile_domains = dedupe_text_items(profile.get("domains", []))
-    profile_skill_set = {item.lower() for item in profile_skills}
-    profile_domain_set = {item.lower() for item in profile_domains}
-    title_hints = dedupe_text_items(
-        [
-            profile.get("current_title"),
-            *profile.get("roles", []),
-            *profile.get("preferred_job_titles", []),
-            *profile.get("team_keywords", []),
-        ]
-    )
-    location_hints = dedupe_text_items([*profile.get("locations", []), *profile.get("preferred_locations", [])])
-    profile_tokens = tokenize_text(profile.get("summary"), *title_hints, *profile_skills, *profile_domains)
-
-    jobs = fetch_jobs_for_recommendation(companies=companies)
-    scored_jobs: list[dict[str, Any]] = []
-
-    for job in jobs:
-        job_skills = dedupe_text_items(job.get("skills", []))
-        job_domains = dedupe_text_items(job.get("domains", []))
-        matched_skills = [skill for skill in job_skills if skill.lower() in profile_skill_set]
-        matched_domains = [domain for domain in job_domains if domain.lower() in profile_domain_set]
-
-        job_text_tokens = tokenize_text(
-            job.get("title"),
-            job.get("team"),
-            job.get("team_description"),
-            job.get("responsibilities"),
-            job.get("minimum_qualifications"),
-            job.get("preferred_qualifications"),
-            *(job.get("locations") or []),
-            *job_skills,
-            *job_domains,
-        )
-        token_overlap = len(profile_tokens & job_text_tokens)
-        title_match = bool(tokenize_text(job.get("title"), job.get("team")) & tokenize_text(*title_hints))
-        location_match = bool(tokenize_text(*(job.get("locations") or [])) & tokenize_text(*location_hints))
-
-        score = (
-            len(matched_skills) * 8
-            + len(matched_domains) * 6
-            + token_overlap * 2
-            + (10 if title_match else 0)
-            + (4 if location_match else 0)
-        )
-
-        if score <= 0:
-            continue
-
-        scored_jobs.append(
-            {
-                **job,
-                "matched_skills": matched_skills,
-                "matched_domains": matched_domains,
-                "recommendation_score": score,
-                "recommendation_reason": build_recommendation_reason(
-                    matched_skills=matched_skills,
-                    matched_domains=matched_domains,
-                    title_match=title_match,
-                    location_match=location_match,
-                ),
-            }
-        )
-
-    scored_jobs.sort(
-        key=lambda item: (
-            item.get("recommendation_score", 0),
-            item.get("posted_at") or "",
-            item.get("job_id") or "",
-        ),
-        reverse=True,
-    )
-
-    total = len(scored_jobs)
-    offset = (page - 1) * page_size
-    paged_jobs = scored_jobs[offset : offset + page_size]
-
-    with db_connect() as conn:
-        companies_all = fetch_company_options(conn)
-
-    return {
-        "jobs": [serialize_job(job) for job in paged_jobs],
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "companies": companies_all,
-        "source": "recommendation",
-        "resume": serialize_resume(resume),
-        "profile": serialize_resume_profile(profile),
-    }
-
-
-def allowed_resume_file(filename: str) -> bool:
-    return Path(filename).suffix.lower() in ALLOWED_RESUME_EXTENSIONS
-
-
-def save_uploaded_resume(file_storage) -> tuple[Path, int]:
-    safe_name = secure_filename(file_storage.filename or "resume.docx")
-    target_path = RESUME_STORAGE_DIR / safe_name
-    suffix = 1
-    while target_path.exists():
-        target_path = RESUME_STORAGE_DIR / f"{Path(safe_name).stem}-{suffix}{Path(safe_name).suffix}"
-        suffix += 1
-    file_storage.save(target_path)
-    return target_path, target_path.stat().st_size
-
-
-def extract_text_from_docx(docx_path: Path) -> str:
-    document = Document(str(docx_path))
-    parts: list[str] = []
-
-    for paragraph in document.paragraphs:
-        text = paragraph.text.strip()
-        if text:
-            parts.append(text)
-
-    for table in document.tables:
-        for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-            if cells:
-                parts.append(" | ".join(cells))
-
-    return "\n".join(parts).strip()
-
-
-def dedupe_text_items(items: list[Any]) -> list[str]:
-    seen: set[str] = set()
-    normalized: list[str] = []
-    for item in items:
-        value = str(item or "").strip()
-        if not value:
-            continue
-        lowered = value.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        normalized.append(value)
-    return normalized
-
-
-def parse_json_payload(text: str) -> dict[str, Any]:
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-    return json.loads(text)
-
-
-def normalize_resume_with_llm(raw_text: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    if not (LLM_BASE_URL and LLM_API_KEY and LLM_MODEL):
-        return fallback_resume_profile(raw_text), {
-            "normalization_method": "fallback",
-            "llm_model": None,
-        }
-
-    prompt = {
-        "role": "user",
-        "content": (
-            "Normalize the following resume into JSON. "
-            "Return only valid JSON with these keys: "
-            "candidate_name, summary, years_of_experience, current_title, seniority, "
-            "locations, skills, domains, companies, roles, preferred_job_titles, "
-            "preferred_locations, team_keywords, responsibility_keywords, qualification_keywords, "
-            "education, certifications, projects, experience_items. "
-            "education, projects, and experience_items must be arrays. "
-            "skills/domains/companies/roles and keyword fields must be arrays of strings. "
-            "Focus on fields that map well to software engineering job postings.\n\n"
-            f"Resume:\n{raw_text}"
-        ),
-    }
-
-    response = requests.post(
-        f"{LLM_BASE_URL}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {LLM_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": LLM_MODEL,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You extract structured recruiting profiles from resumes. Output JSON only.",
-                },
-                prompt,
-            ],
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"},
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    content = payload["choices"][0]["message"]["content"]
-    parsed = parse_json_payload(content)
-    return parsed, {
-        "normalization_method": "llm",
-        "llm_model": LLM_MODEL,
-    }
-
-
-def fallback_resume_profile(raw_text: str) -> dict[str, Any]:
-    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-    summary = " ".join(lines[:5])[:800]
-    candidate_name = lines[0] if lines else None
-
-    known_skills = [
-        "Python", "Java", "JavaScript", "TypeScript", "React", "Vue", "Node.js",
-        "PostgreSQL", "MySQL", "MongoDB", "Redis", "Elasticsearch", "Docker",
-        "Kubernetes", "AWS", "GCP", "Azure", "Flask", "Django", "FastAPI",
-        "Spring", "Go", "Rust", "C++", "C#", "TensorFlow", "PyTorch",
-    ]
-    found_skills = [skill for skill in known_skills if re.search(rf"\b{re.escape(skill)}\b", raw_text, re.IGNORECASE)]
-
-    companies = []
-    roles = []
-    for line in lines[:30]:
-        if re.search(r"\b(engineer|developer|manager|lead|architect)\b", line, re.IGNORECASE):
-            roles.append(line[:120])
-
-    return {
-        "candidate_name": candidate_name,
-        "summary": summary,
-        "years_of_experience": None,
-        "current_title": roles[0] if roles else None,
-        "seniority": None,
-        "locations": [],
-        "skills": dedupe_text_items(found_skills),
-        "domains": [],
-        "companies": dedupe_text_items(companies),
-        "roles": dedupe_text_items(roles),
-        "preferred_job_titles": [],
-        "preferred_locations": [],
-        "team_keywords": [],
-        "responsibility_keywords": [],
-        "qualification_keywords": dedupe_text_items(found_skills),
-        "education": [],
-        "certifications": [],
-        "projects": [],
-        "experience_items": [],
-    }
-
-
-def sanitize_profile(profile: dict[str, Any]) -> dict[str, Any]:
-    years_of_experience = profile.get("years_of_experience")
-    try:
-        years_of_experience = float(years_of_experience) if years_of_experience is not None else None
-    except (TypeError, ValueError):
-        years_of_experience = None
-
-    return {
-        "candidate_name": profile.get("candidate_name"),
-        "summary": profile.get("summary"),
-        "years_of_experience": years_of_experience,
-        "current_title": profile.get("current_title"),
-        "seniority": profile.get("seniority"),
-        "locations": dedupe_text_items(profile.get("locations", [])),
-        "skills": dedupe_text_items(profile.get("skills", [])),
-        "domains": dedupe_text_items(profile.get("domains", [])),
-        "companies": dedupe_text_items(profile.get("companies", [])),
-        "roles": dedupe_text_items(profile.get("roles", [])),
-        "preferred_job_titles": dedupe_text_items(profile.get("preferred_job_titles", [])),
-        "preferred_locations": dedupe_text_items(profile.get("preferred_locations", [])),
-        "team_keywords": dedupe_text_items(profile.get("team_keywords", [])),
-        "responsibility_keywords": dedupe_text_items(profile.get("responsibility_keywords", [])),
-        "qualification_keywords": dedupe_text_items(profile.get("qualification_keywords", [])),
-        "education": profile.get("education", []),
-        "certifications": dedupe_text_items(profile.get("certifications", [])),
-        "projects": profile.get("projects", []),
-        "experience_items": profile.get("experience_items", []),
-    }
-
-
-def insert_resume_record(*, filename: str, content_type: str | None, storage_path: Path, file_size_bytes: int) -> int:
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO job_web_resumes (filename, content_type, storage_path, file_size_bytes, status)
-                VALUES (%s, %s, %s, %s, 'uploaded')
-                RETURNING id
-                """,
-                (filename, content_type, str(storage_path), file_size_bytes),
-            )
-            resume_id = cur.fetchone()[0]
-        conn.commit()
-    return resume_id
-
-
-def update_resume_text(*, resume_id: int, raw_text: str) -> None:
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE job_web_resumes
-                SET raw_text = %s,
-                    status = 'text_extracted',
-                    updated_at = NOW()
-                WHERE id = %s
-                """,
-                (raw_text, resume_id),
-            )
-        conn.commit()
-
-
-def update_resume_failure(*, resume_id: int, message: str) -> None:
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE job_web_resumes
-                SET status = 'failed',
-                    extract_error = %s,
-                    updated_at = NOW()
-                WHERE id = %s
-                """,
-                (message, resume_id),
-            )
-        conn.commit()
-
-
-def mark_resume_storage_deleted(*, resume_id: int, filename: str) -> None:
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                UPDATE {RESUME_TABLE}
-                SET storage_path = %s,
-                    updated_at = NOW()
-                WHERE id = %s
-                """,
-                (f"deleted://{filename}", resume_id),
-            )
-        conn.commit()
-
-
-def upsert_resume_profile(*, resume_id: int, profile: dict[str, Any], metadata: dict[str, Any]) -> None:
-    profile = sanitize_profile(profile)
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO job_web_resume_profiles (
-                    resume_id, candidate_name, summary, years_of_experience, current_title,
-                    seniority, locations, skills, domains, companies, roles,
-                    preferred_job_titles, preferred_locations, team_keywords,
-                    responsibility_keywords, qualification_keywords, education,
-                    certifications, projects, experience_items, raw_profile_json
-                )
-                VALUES (
-                    %(resume_id)s, %(candidate_name)s, %(summary)s, %(years_of_experience)s, %(current_title)s,
-                    %(seniority)s, %(locations)s, %(skills)s, %(domains)s, %(companies)s, %(roles)s,
-                    %(preferred_job_titles)s, %(preferred_locations)s, %(team_keywords)s,
-                    %(responsibility_keywords)s, %(qualification_keywords)s, %(education)s,
-                    %(certifications)s, %(projects)s, %(experience_items)s, %(raw_profile_json)s
-                )
-                ON CONFLICT (resume_id) DO UPDATE SET
-                    candidate_name = EXCLUDED.candidate_name,
-                    summary = EXCLUDED.summary,
-                    years_of_experience = EXCLUDED.years_of_experience,
-                    current_title = EXCLUDED.current_title,
-                    seniority = EXCLUDED.seniority,
-                    locations = EXCLUDED.locations,
-                    skills = EXCLUDED.skills,
-                    domains = EXCLUDED.domains,
-                    companies = EXCLUDED.companies,
-                    roles = EXCLUDED.roles,
-                    preferred_job_titles = EXCLUDED.preferred_job_titles,
-                    preferred_locations = EXCLUDED.preferred_locations,
-                    team_keywords = EXCLUDED.team_keywords,
-                    responsibility_keywords = EXCLUDED.responsibility_keywords,
-                    qualification_keywords = EXCLUDED.qualification_keywords,
-                    education = EXCLUDED.education,
-                    certifications = EXCLUDED.certifications,
-                    projects = EXCLUDED.projects,
-                    experience_items = EXCLUDED.experience_items,
-                    raw_profile_json = EXCLUDED.raw_profile_json,
-                    updated_at = NOW()
-                """,
-                {
-                    "resume_id": resume_id,
-                    "candidate_name": profile["candidate_name"],
-                    "summary": profile["summary"],
-                    "years_of_experience": profile["years_of_experience"],
-                    "current_title": profile["current_title"],
-                    "seniority": profile["seniority"],
-                    "locations": profile["locations"],
-                    "skills": profile["skills"],
-                    "domains": profile["domains"],
-                    "companies": profile["companies"],
-                    "roles": profile["roles"],
-                    "preferred_job_titles": profile["preferred_job_titles"],
-                    "preferred_locations": profile["preferred_locations"],
-                    "team_keywords": profile["team_keywords"],
-                    "responsibility_keywords": profile["responsibility_keywords"],
-                    "qualification_keywords": profile["qualification_keywords"],
-                    "education": psycopg2.extras.Json(profile["education"]),
-                    "certifications": profile["certifications"],
-                    "projects": psycopg2.extras.Json(profile["projects"]),
-                    "experience_items": psycopg2.extras.Json(profile["experience_items"]),
-                    "raw_profile_json": psycopg2.extras.Json(profile),
-                },
-            )
-            cur.execute(
-                """
-                UPDATE job_web_resumes
-                SET status = 'normalized',
-                    llm_model = %s,
-                    normalization_method = %s,
-                    normalized_at = NOW(),
-                    extract_error = NULL,
-                    updated_at = NOW()
-                WHERE id = %s
-                """,
-                (metadata.get("llm_model"), metadata.get("normalization_method"), resume_id),
-            )
-        conn.commit()
-
-
-def fetch_resume_and_profile(*, resume_id: int | None = None, latest: bool = False) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+def fetch_resume_record(*, resume_id: int | None = None, latest: bool = False) -> dict[str, Any] | None:
     clause = "r.id = %s"
-    params: tuple[Any, ...] = (resume_id,)
+    params: list[Any] = [resume_id]
     if latest:
-        clause = "TRUE"
-        params = ()
+        clause = "r.is_active = TRUE"
+        params = []
 
     with db_connect() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -871,58 +427,283 @@ def fetch_resume_and_profile(*, resume_id: int | None = None, latest: bool = Fal
                 f"""
                 SELECT
                     r.id,
-                    r.filename,
-                    r.content_type,
-                    r.storage_path,
-                    r.file_size_bytes,
-                    r.status,
+                    r.label,
+                    r.minio_key,
                     r.raw_text,
-                    r.extract_error,
-                    r.llm_model,
-                    r.normalization_method,
-                    r.normalized_at,
-                    r.created_at,
-                    r.updated_at
-                FROM job_web_resumes r
+                    r.skills,
+                    r.summary,
+                    r.content_embedding,
+                    r.uploaded_at,
+                    r.is_active,
+                    COALESCE(stats.recommendation_count, 0) AS recommendation_count,
+                    stats.latest_ranked_at
+                FROM resumes r
+                LEFT JOIN (
+                    SELECT
+                        resume_id,
+                        COUNT(*) AS recommendation_count,
+                        MAX(ranked_at) AS latest_ranked_at
+                    FROM resume_job_recommendations
+                    GROUP BY resume_id
+                ) stats ON stats.resume_id = r.id
                 WHERE {clause}
-                ORDER BY r.created_at DESC
+                ORDER BY r.uploaded_at DESC, r.id DESC
                 LIMIT 1
                 """,
                 params,
             )
+            row = cur.fetchone()
+
+    return dict(row) if row else None
+
+
+def fetch_resume_and_profile(*, resume_id: int | None = None, latest: bool = False) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    resume = fetch_resume_record(resume_id=resume_id, latest=latest)
+    profile = resume if resume else None
+    return resume, profile
+
+
+def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str]) -> dict[str, Any]:
+    offset = (page - 1) * page_size
+
+    with db_connect() as conn:
+        companies_all = fetch_company_options(conn)
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    r.id,
+                    r.label,
+                    r.minio_key,
+                    r.raw_text,
+                    r.skills,
+                    r.summary,
+                    r.content_embedding,
+                    r.uploaded_at,
+                    r.is_active,
+                    COALESCE(stats.recommendation_count, 0) AS recommendation_count,
+                    stats.latest_ranked_at
+                FROM resumes r
+                LEFT JOIN (
+                    SELECT
+                        resume_id,
+                        COUNT(*) AS recommendation_count,
+                        MAX(ranked_at) AS latest_ranked_at
+                    FROM resume_job_recommendations
+                    GROUP BY resume_id
+                ) stats ON stats.resume_id = r.id
+                WHERE r.is_active = TRUE
+                ORDER BY r.uploaded_at DESC, r.id DESC
+                LIMIT 1
+                """
+            )
             resume = cur.fetchone()
 
             if not resume:
-                return None, None
+                raise ValueError("추천을 사용하려면 먼저 최신 이력서를 업로드해 주세요.")
+
+            resume_dict = dict(resume)
+            if int(resume_dict.get("recommendation_count") or 0) <= 0:
+                return {
+                    "jobs": [],
+                    "total": 0,
+                    "page": page,
+                    "page_size": page_size,
+                    "companies": companies_all,
+                    "source": "recommendation",
+                    "resume": serialize_resume(resume_dict),
+                    "profile": serialize_resume_profile(resume_dict),
+                    "recommendation_ready": False,
+                    "message": build_resume_message(resume_dict),
+                }
+
+            filters = ["r.resume_id = %s", "j.is_active = TRUE"]
+            params: list[Any] = [resume_dict["id"]]
+            if companies:
+                filters.append("j.company = ANY(%s)")
+                params.append(companies)
+
+            where_clause = " AND ".join(filters)
 
             cur.execute(
-                """
-                SELECT *
-                FROM job_web_resume_profiles
-                WHERE resume_id = %s
+                f"""
+                SELECT COUNT(*) AS total
+                FROM resume_job_recommendations r
+                JOIN jobs j USING (job_id)
+                WHERE {where_clause}
                 """,
-                (resume["id"],),
+                params,
             )
-            profile = cur.fetchone()
+            total = cur.fetchone()["total"]
 
-    return dict(resume), dict(profile) if profile else None
+            cur.execute(
+                f"""
+                SELECT
+                    j.job_id,
+                    j.company,
+                    j.title,
+                    j.locations,
+                    j.level_guess,
+                    j.team,
+                    j.raw_description,
+                    j.team_description,
+                    j.responsibilities,
+                    j.minimum_qualifications,
+                    j.preferred_qualifications,
+                    j.skills,
+                    j.domains,
+                    j.url,
+                    j.posted_at,
+                    j.first_seen_at,
+                    j.last_seen_at,
+                    j.is_active,
+                    j.detail_extracted_at,
+                    j.summary,
+                    r.score AS recommendation_score
+                FROM resume_job_recommendations r
+                JOIN jobs j USING (job_id)
+                WHERE {where_clause}
+                ORDER BY r.score DESC, j.posted_at DESC NULLS LAST, j.last_seen_at DESC, j.job_id ASC
+                OFFSET %s
+                LIMIT %s
+                """,
+                [*params, offset, page_size],
+            )
+            jobs = [serialize_job(dict(row)) for row in cur.fetchall()]
+
+    return {
+        "jobs": jobs,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "companies": companies_all,
+        "source": "recommendation",
+        "resume": serialize_resume(resume_dict),
+        "profile": serialize_resume_profile(resume_dict),
+        "recommendation_ready": True,
+        "message": None,
+    }
 
 
-def process_uploaded_resume(*, resume_id: int, storage_path: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    raw_text = extract_text_from_docx(storage_path)
-    update_resume_text(resume_id=resume_id, raw_text=raw_text)
+def allowed_resume_file(filename: str) -> bool:
+    return Path(filename).suffix.lower() in ALLOWED_RESUME_EXTENSIONS
 
-    profile, metadata = normalize_resume_with_llm(raw_text)
-    upsert_resume_profile(resume_id=resume_id, profile=profile, metadata=metadata)
+
+def get_minio_client() -> Minio:
+    if not MINIO_ACCESS_KEY or not MINIO_SECRET_KEY:
+        raise RuntimeError("MinIO credentials are not configured.")
+
+    return Minio(
+        MINIO_ENDPOINT,
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        secure=MINIO_SECURE,
+    )
+
+
+def ensure_resume_bucket(client: Minio) -> None:
+    if not client.bucket_exists(RESUME_BUCKET):
+        client.make_bucket(RESUME_BUCKET)
+
+
+def resume_object_key(resume_id: int, filename: str) -> str:
+    safe_name = secure_filename(filename or "resume.docx") or "resume.docx"
+    return f"resumes/{resume_id}/{safe_name}"
+
+
+def upload_resume_object(*, resume_id: int, filename: str, data: bytes) -> str:
+    object_key = resume_object_key(resume_id, filename)
+    client = get_minio_client()
+    ensure_resume_bucket(client)
+    client.put_object(
+        RESUME_BUCKET,
+        object_key,
+        io.BytesIO(data),
+        len(data),
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    return object_key
+
+
+def delete_resume_object(object_key: str | None) -> None:
+    if not object_key:
+        return
+
+    client = get_minio_client()
     try:
-        if storage_path.exists():
-            storage_path.unlink()
-            mark_resume_storage_deleted(resume_id=resume_id, filename=storage_path.name)
-    except OSError:
-        logger.warning("Failed to delete processed resume file %s", storage_path)
+        client.remove_object(RESUME_BUCKET, object_key)
+    except S3Error as exc:
+        if exc.code != "NoSuchKey":
+            raise
 
-    resume, saved_profile = fetch_resume_and_profile(resume_id=resume_id)
-    return serialize_resume(resume), serialize_resume_profile(saved_profile)
+
+def create_resume_record(*, label: str) -> int:
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO resumes (label)
+                VALUES (%s)
+                RETURNING id
+                """,
+                (label,),
+            )
+            resume_id = cur.fetchone()[0]
+        conn.commit()
+    return int(resume_id)
+
+
+def update_resume_minio_key(*, resume_id: int, minio_key: str) -> None:
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE resumes
+                SET minio_key = %s
+                WHERE id = %s
+                """,
+                (minio_key, resume_id),
+            )
+        conn.commit()
+
+
+def delete_resume_record(*, resume_id: int) -> None:
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM resume_job_recommendations WHERE resume_id = %s", (resume_id,))
+            cur.execute("DELETE FROM resumes WHERE id = %s", (resume_id,))
+        conn.commit()
+
+
+def trigger_resume_dag(resume_id: int) -> dict[str, Any]:
+    if not AIRFLOW_API_BASE_URL:
+        raise RuntimeError("AIRFLOW_API_BASE_URL is not configured.")
+
+    dag_run_id = f"job-web-resume-{resume_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+    auth = HTTPBasicAuth(AIRFLOW_API_USERNAME, AIRFLOW_API_PASSWORD) if AIRFLOW_API_USERNAME else None
+    response = requests.post(
+        f"{AIRFLOW_API_BASE_URL}/api/v1/dags/{AIRFLOW_DAG_ID}/dagRuns",
+        json={
+            "dag_run_id": dag_run_id,
+            "conf": {
+                "resume_id": resume_id,
+            },
+        },
+        auth=auth,
+        timeout=15,
+    )
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Airflow trigger failed with status {response.status_code}: {response.text[:240]}"
+        )
+
+    payload = response.json()
+    return {
+        "dag_run_id": payload.get("dag_run_id", dag_run_id),
+        "state": payload.get("state"),
+    }
 
 
 @app.get("/healthz")
@@ -973,7 +754,7 @@ def recommend_jobs():
     except ValueError as exc:
         return jsonify({"error": "resume_required", "message": str(exc)}), 404
     except Exception as exc:
-        logger.exception("Failed to recommend jobs from resume")
+        logger.exception("Failed to load recommendation jobs")
         return jsonify({"error": "failed_to_recommend_jobs", "message": str(exc)}), 500
 
 
@@ -1031,27 +812,39 @@ def upload_resume():
     if not allowed_resume_file(file_storage.filename):
         return jsonify({"error": "invalid_file_type", "message": "Only .docx files are supported."}), 400
 
-    storage_path, file_size = save_uploaded_resume(file_storage)
-    resume_id = insert_resume_record(
-        filename=file_storage.filename,
-        content_type=file_storage.content_type,
-        storage_path=storage_path,
-        file_size_bytes=file_size,
-    )
+    data = file_storage.read()
+    if not data:
+        return jsonify({"error": "empty_file", "message": "The uploaded DOCX file is empty."}), 400
+
+    resume_id = create_resume_record(label=file_storage.filename)
+    object_key: str | None = None
 
     try:
-        resume, profile = process_uploaded_resume(resume_id=resume_id, storage_path=storage_path)
-        return jsonify({"resume": resume, "profile": profile}), 201
-    except Exception as exc:
-        logger.exception("Failed to process uploaded resume")
-        update_resume_failure(resume_id=resume_id, message=str(exc))
+        object_key = upload_resume_object(resume_id=resume_id, filename=file_storage.filename, data=data)
+        update_resume_minio_key(resume_id=resume_id, minio_key=object_key)
+        dag_run = trigger_resume_dag(resume_id)
+
         resume, profile = fetch_resume_and_profile(resume_id=resume_id)
-        return jsonify({
-            "error": "resume_processing_failed",
-            "message": str(exc),
-            "resume": serialize_resume(resume),
-            "profile": serialize_resume_profile(profile),
-        }), 500
+        return jsonify(
+            {
+                "resume": serialize_resume(resume),
+                "profile": serialize_resume_profile(profile),
+                "recommendation_ready": False,
+                "message": build_resume_message(resume),
+                "dag_run_id": dag_run.get("dag_run_id"),
+            }
+        ), 202
+    except Exception as exc:
+        logger.exception("Failed to upload and queue resume")
+        try:
+            delete_resume_object(object_key)
+        except Exception:
+            logger.exception("Failed to delete resume object during rollback")
+        try:
+            delete_resume_record(resume_id=resume_id)
+        except Exception:
+            logger.exception("Failed to delete resume row during rollback")
+        return jsonify({"error": "resume_upload_failed", "message": str(exc)}), 500
 
 
 @app.get("/api/resumes/latest")
@@ -1060,7 +853,14 @@ def latest_resume():
     resume, profile = fetch_resume_and_profile(latest=True)
     if not resume:
         return jsonify({"error": "resume_not_found"}), 404
-    return jsonify({"resume": serialize_resume(resume), "profile": serialize_resume_profile(profile)})
+    return jsonify(
+        {
+            "resume": serialize_resume(resume),
+            "profile": serialize_resume_profile(profile),
+            "recommendation_ready": int(resume.get("recommendation_count") or 0) > 0,
+            "message": build_resume_message(resume),
+        }
+    )
 
 
 @app.get("/api/resumes/<int:resume_id>")
@@ -1069,7 +869,14 @@ def get_resume(resume_id: int):
     resume, profile = fetch_resume_and_profile(resume_id=resume_id)
     if not resume:
         return jsonify({"error": "resume_not_found"}), 404
-    return jsonify({"resume": serialize_resume(resume), "profile": serialize_resume_profile(profile)})
+    return jsonify(
+        {
+            "resume": serialize_resume(resume),
+            "profile": serialize_resume_profile(profile),
+            "recommendation_ready": int(resume.get("recommendation_count") or 0) > 0,
+            "message": build_resume_message(resume),
+        }
+    )
 
 
 @app.get("/api/resumes/<int:resume_id>/profile")
@@ -1078,7 +885,14 @@ def get_resume_profile(resume_id: int):
     resume, profile = fetch_resume_and_profile(resume_id=resume_id)
     if not resume:
         return jsonify({"error": "resume_not_found"}), 404
-    return jsonify({"resume": serialize_resume(resume), "profile": serialize_resume_profile(profile)})
+    return jsonify(
+        {
+            "resume": serialize_resume(resume),
+            "profile": serialize_resume_profile(profile),
+            "recommendation_ready": int(resume.get("recommendation_count") or 0) > 0,
+            "message": build_resume_message(resume),
+        }
+    )
 
 
 @app.delete("/api/resumes/<int:resume_id>")
@@ -1088,21 +902,12 @@ def delete_resume(resume_id: int):
     if not resume:
         return jsonify({"error": "resume_not_found"}), 404
 
-    storage_path_value = resume["storage_path"]
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM job_web_resumes WHERE id = %s", (resume_id,))
-        conn.commit()
+    delete_resume_record(resume_id=resume_id)
 
     try:
-        if storage_path_value and not str(storage_path_value).startswith("deleted://"):
-            storage_path = Path(storage_path_value)
-        else:
-            storage_path = None
-        if storage_path and storage_path.exists():
-            storage_path.unlink()
-    except OSError:
-        logger.warning("Failed to delete resume file %s", storage_path)
+        delete_resume_object(resume.get("minio_key"))
+    except Exception:
+        logger.exception("Failed to delete MinIO object for resume %s", resume_id)
 
     return jsonify({"deleted": True, "resume_id": resume_id})
 
