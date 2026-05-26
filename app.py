@@ -12,7 +12,6 @@ import requests
 from flask import Flask, jsonify, request, send_from_directory
 from minio import Minio
 from minio.error import S3Error
-from requests.auth import HTTPBasicAuth
 from werkzeug.utils import secure_filename
 
 
@@ -681,16 +680,39 @@ def trigger_resume_dag(resume_id: int) -> dict[str, Any]:
         raise RuntimeError("AIRFLOW_API_BASE_URL is not configured.")
 
     dag_run_id = f"job-web-resume-{resume_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
-    auth = HTTPBasicAuth(AIRFLOW_API_USERNAME, AIRFLOW_API_PASSWORD) if AIRFLOW_API_USERNAME else None
+    headers = {}
+
+    if AIRFLOW_API_USERNAME:
+        token_response = requests.post(
+            f"{AIRFLOW_API_BASE_URL}/auth/token",
+            json={
+                "username": AIRFLOW_API_USERNAME,
+                "password": AIRFLOW_API_PASSWORD,
+            },
+            timeout=15,
+        )
+        if token_response.status_code >= 400:
+            raise RuntimeError(
+                f"Airflow token request failed with status {token_response.status_code}: {token_response.text[:240]}"
+            )
+
+        token_payload = token_response.json()
+        access_token = token_payload.get("access_token")
+        if not access_token:
+            raise RuntimeError("Airflow token response did not contain access_token.")
+
+        headers["Authorization"] = f"Bearer {access_token}"
+
     response = requests.post(
-        f"{AIRFLOW_API_BASE_URL}/api/v1/dags/{AIRFLOW_DAG_ID}/dagRuns",
+        f"{AIRFLOW_API_BASE_URL}/api/v2/dags/{AIRFLOW_DAG_ID}/dagRuns",
         json={
             "dag_run_id": dag_run_id,
+            "logical_date": datetime.now(timezone.utc).isoformat(),
             "conf": {
                 "resume_id": resume_id,
             },
         },
-        auth=auth,
+        headers=headers,
         timeout=15,
     )
 
