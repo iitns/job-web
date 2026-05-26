@@ -258,6 +258,73 @@ function formatLocationList(locations) {
   return values.length ? values.join(' / ') : '미정'
 }
 
+function renderMobileMetaLine(job) {
+  const parts = [
+    `<span class="job-company">${escapeHtml(job.company)}</span>`,
+  ]
+
+  if (job.level_guess) {
+    parts.push(`<span class="job-level">${escapeHtml(job.level_guess)}</span>`)
+  }
+
+  parts.push(`<span class="job-location">${escapeHtml(summarizeLocationList(job.locations))}</span>`)
+  parts.push(`<span class="job-date">${escapeHtml(formatCardDate(job.posted_at))}</span>`)
+
+  return parts
+    .map((part, index) => (index === 0 ? part : `<span class="job-meta-divider">·</span>${part}`))
+    .join('')
+}
+
+function renderJobCardHeader(job) {
+  if (state.isMobile) {
+    return `
+      <div class="job-card-topline mobile">
+        <div class="job-card-titleblock">
+          <div class="job-card-meta-row">
+            ${renderMobileMetaLine(job)}
+          </div>
+          <div class="job-card-titleline">
+            <span class="job-title">${escapeHtml(job.title)}</span>
+          </div>
+        </div>
+        ${
+          job.recommendation_score
+            ? `
+              <div class="job-card-sidegroup mobile">
+                <span class="recommendation-badge">${escapeHtml(job.recommendation_score)}</span>
+              </div>
+            `
+            : ''
+        }
+      </div>
+    `
+  }
+
+  return `
+    <div class="job-card-topline">
+      <div class="job-card-titleblock">
+        <div class="job-card-titleline">
+          <span class="job-company">${escapeHtml(job.company)}</span>
+          <span class="job-meta-divider">·</span>
+          <span class="job-title">${escapeHtml(job.title)}</span>
+        </div>
+      </div>
+      <div class="job-card-sidegroup">
+        <div class="job-card-side-meta">
+          <span>${escapeHtml(summarizeLocationList(job.locations))}</span>
+          <span class="job-meta-divider">·</span>
+          <span>${escapeHtml(formatCardDate(job.posted_at))}</span>
+        </div>
+        ${
+          job.recommendation_score
+            ? `<span class="recommendation-badge">${escapeHtml(job.recommendation_score)}</span>`
+            : ''
+        }
+      </div>
+    </div>
+  `
+}
+
 function splitTextLines(value) {
   return String(value || '')
     .split(/\n+/)
@@ -508,27 +575,7 @@ function renderJobs() {
         .map(
           (job) => `
             <button class="job-card ${state.selectedJobId === job.job_id ? 'selected' : ''}" type="button" data-job-id="${escapeHtml(job.job_id)}">
-              <div class="job-card-topline">
-                <div class="job-card-titleblock">
-                  <div class="job-card-titleline">
-                    <span class="job-company">${escapeHtml(job.company)}</span>
-                    <span class="job-meta-divider">·</span>
-                    <span class="job-title">${escapeHtml(job.title)}</span>
-                  </div>
-                </div>
-                <div class="job-card-sidegroup">
-                  <div class="job-card-side-meta">
-                    <span>${escapeHtml(summarizeLocationList(job.locations))}</span>
-                    <span class="job-meta-divider">·</span>
-                    <span>${formatCardDate(job.posted_at)}</span>
-                  </div>
-                  ${
-                    job.recommendation_score
-                      ? `<span class="recommendation-badge">${escapeHtml(job.recommendation_score)}</span>`
-                      : ''
-                  }
-                </div>
-              </div>
+              ${renderJobCardHeader(job)}
               <p class="job-summary">${escapeHtml(jobSummary(job))}</p>
               ${
                 job.recommendation_reason
