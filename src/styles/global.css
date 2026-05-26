@@ -709,11 +709,12 @@ button {
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr);
   gap: 10px;
-  align-items: start;
+  align-items: center;
 }
 
 .job-chip-label {
   display: block;
+  align-self: center;
   font-size: 0.82rem;
   font-weight: 700;
   color: var(--primary);
@@ -903,13 +904,6 @@ button {
   display: inline-flex;
   text-decoration: none;
   margin-top: 28px;
-}
-
-@media (min-width: 641px) {
-  .job-chip-label {
-    padding-top: 5px;
-    line-height: 1;
-  }
 }
 
 @media (max-width: 980px) {
