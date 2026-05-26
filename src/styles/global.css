@@ -104,15 +104,6 @@ button {
   padding: 10px 16px;
 }
 
-.nav-wordmark {
-  font-size: 0.76rem;
-  font-weight: 800;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--primary);
-  white-space: nowrap;
-}
-
 .nav-tabs {
   display: flex;
   gap: 8px;
@@ -140,13 +131,34 @@ button {
 .nav-mobile-copy {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 
 .nav-current-tab {
   font-weight: 800;
   color: #17362b;
+}
+
+.home-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  color: var(--primary);
+  text-decoration: none;
+}
+
+.home-icon {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
 }
 
 .nav-menu-button {
@@ -436,6 +448,20 @@ button {
   font-weight: 700;
 }
 
+.search-input-shell {
+  display: block;
+}
+
+.search-control-group {
+  display: grid;
+  gap: 10px;
+}
+
+.panel-divider {
+  height: 1px;
+  background: rgba(19, 38, 31, 0.08);
+}
+
 .text-input {
   width: 100%;
   border: 1px solid rgba(28, 108, 75, 0.16);
@@ -570,34 +596,6 @@ button {
   gap: 12px;
 }
 
-.company-lockup {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  min-width: 0;
-  flex: 1;
-}
-
-.company-logo {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  object-fit: cover;
-  flex: 0 0 auto;
-  border: 1px solid rgba(19, 38, 31, 0.08);
-  background: white;
-}
-
-.company-logo.fallback {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(135deg, rgba(216, 244, 107, 0.8), rgba(28, 108, 75, 0.22));
-  color: #1b4134;
-  font-size: 0.88rem;
-  font-weight: 700;
-}
-
 .job-card-titleblock {
   min-width: 0;
   flex: 1;
@@ -611,7 +609,7 @@ button {
 }
 
 .job-company {
-  max-width: 110px;
+  max-width: 144px;
   color: var(--text-subtle);
   font-size: 0.86rem;
   font-weight: 700;
@@ -909,10 +907,6 @@ button {
 
   .job-card {
     padding: 16px;
-  }
-
-  .job-company {
-    display: none;
   }
 
   .job-card-sidegroup {

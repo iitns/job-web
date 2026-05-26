@@ -201,6 +201,52 @@ function compactLocation(value) {
   return fallback.length > 12 ? `${fallback.slice(0, 11)}…` : fallback
 }
 
+function extractLocationLabel(value) {
+  const input = String(value || '').trim()
+  if (!input) {
+    return ''
+  }
+
+  const normalizedInput = normalizeLocationKey(input)
+  if (normalizedInput.includes('remote')) {
+    return 'Remote'
+  }
+  if (normalizedInput.includes('hybrid')) {
+    return 'Hybrid'
+  }
+
+  const [city] = input
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  return city || compactLocation(input)
+}
+
+function summarizeLocationList(locations, fallbackValue = '') {
+  const labels = []
+
+  normalizeList(locations).forEach((item) => {
+    const label = extractLocationLabel(item)
+    if (label && !labels.includes(label)) {
+      labels.push(label)
+    }
+  })
+
+  if (!labels.length && fallbackValue) {
+    const fallbackLabel = extractLocationLabel(fallbackValue)
+    if (fallbackLabel) {
+      labels.push(fallbackLabel)
+    }
+  }
+
+  if (!labels.length) {
+    return '미정'
+  }
+
+  return labels.length === 1 ? labels[0] : `${labels[0]} 외 ${labels.length - 1}곳`
+}
+
 function splitTextLines(value) {
   return String(value || '')
     .split(/\n+/)
@@ -217,6 +263,20 @@ function formatYears(value) {
     return '미정'
   }
   return `${value}년`
+}
+
+function renderHomeLink(extraClass = '') {
+  const className = ['home-link', 'icon-button', extraClass].filter(Boolean).join(' ')
+
+  return `
+    <a class="${className}" href="/" aria-label="홈으로 이동">
+      <svg class="home-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M3.75 10.5 12 3.75l8.25 6.75"></path>
+        <path d="M6.75 9.75V20.25H17.25V9.75"></path>
+        <path d="M10.5 20.25V14.25H13.5V20.25"></path>
+      </svg>
+    </a>
+  `
 }
 
 function renderInlineChips(items, emptyLabel = '정보 없음') {
@@ -438,22 +498,16 @@ function renderJobs() {
           (job) => `
             <button class="job-card ${state.selectedJobId === job.job_id ? 'selected' : ''}" type="button" data-job-id="${escapeHtml(job.job_id)}">
               <div class="job-card-topline">
-                <div class="company-lockup">
-                  ${
-                    job.company_logo_url
-                      ? `<img class="company-logo" src="${escapeHtml(job.company_logo_url)}" alt="${escapeHtml(job.company)} 로고" loading="lazy" />`
-                      : `<span class="company-logo fallback">${escapeHtml(job.company_mark || '?')}</span>`
-                  }
-                  <div class="job-card-titleblock">
-                    <div class="job-card-titleline">
-                      <span class="job-company">${escapeHtml(job.company)}</span>
-                      <span class="job-title">${escapeHtml(job.title)}</span>
-                    </div>
+                <div class="job-card-titleblock">
+                  <div class="job-card-titleline">
+                    <span class="job-company">${escapeHtml(job.company)}</span>
+                    <span class="job-meta-divider">·</span>
+                    <span class="job-title">${escapeHtml(job.title)}</span>
                   </div>
                 </div>
                 <div class="job-card-sidegroup">
                   <div class="job-card-side-meta">
-                    <span>${escapeHtml(compactLocation(job.primary_location))}</span>
+                    <span>${escapeHtml(summarizeLocationList(job.locations, job.primary_location || job.location))}</span>
                     <span class="job-meta-divider">·</span>
                     <span>${formatCardDate(job.posted_at)}</span>
                   </div>
@@ -690,7 +744,7 @@ function renderNavigation() {
     return `
       <nav class="top-nav panel mobile-nav">
         <div class="nav-mobile-copy">
-          <span class="nav-wordmark">JOB WEB</span>
+          ${renderHomeLink()}
           <span class="nav-current-tab">${TAB_LABELS[state.activeTab] || TAB_LABELS.search}</span>
         </div>
         <button class="icon-button nav-menu-button" type="button" aria-label="메뉴 열기" data-open-mobile-menu>
@@ -706,7 +760,7 @@ function renderNavigation() {
 
   return `
     <nav class="top-nav panel">
-      <span class="nav-wordmark">JOB WEB</span>
+      ${renderHomeLink()}
       <div class="nav-tabs">
         ${items
           .map(
@@ -725,14 +779,17 @@ function renderNavigation() {
 function renderSearchControls() {
   return `
     <div class="control-stack">
-      <label class="field">
-        <span class="field-label">검색어</span>
-        <input class="text-input" type="text" placeholder="회사, 팀, 스킬, 키워드" value="${escapeHtml(state.draftKeyword)}" />
-      </label>
+      <div class="search-control-group">
+        <div class="search-input-shell">
+          <input class="text-input" type="text" placeholder="회사, 팀, 스킬, 키워드" value="${escapeHtml(state.draftKeyword)}" />
+        </div>
+
+        <div class="panel-divider" aria-hidden="true"></div>
+      </div>
 
       <div class="field">
         <div class="field-row">
-          <span class="field-label">회사 필터</span>
+          <span class="field-label">회사</span>
           <span class="field-meta">${state.companies.length}개</span>
         </div>
         <div class="checkbox-list">
@@ -805,7 +862,7 @@ function renderRecommendationControls({ mobile = false } = {}) {
 
       <div class="field">
         <div class="field-row">
-          <span class="field-label">회사 필터</span>
+          <span class="field-label">회사</span>
           <span class="field-meta">${state.companies.length}개</span>
         </div>
         <div class="checkbox-list">
@@ -865,7 +922,10 @@ function renderMobileMenu() {
       <button class="mobile-menu-backdrop" type="button" aria-label="메뉴 닫기" data-close-mobile-menu></button>
       <aside class="mobile-menu-panel">
         <div class="mobile-menu-header">
-          <span class="nav-wordmark">JOB WEB</span>
+          <div class="nav-mobile-copy">
+            ${renderHomeLink()}
+            <span class="nav-current-tab">${TAB_LABELS[state.activeTab] || TAB_LABELS.search}</span>
+          </div>
           <button class="icon-button" type="button" data-close-mobile-menu>닫기</button>
         </div>
         <div class="mobile-menu-tabs">
