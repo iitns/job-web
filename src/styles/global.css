@@ -57,6 +57,7 @@ button {
   gap: 16px;
   max-width: 1440px;
   margin: 0 auto;
+  min-width: 0;
 }
 
 .ambient {
@@ -86,6 +87,7 @@ button {
   display: grid;
   grid-template-columns: minmax(280px, 304px) minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
 }
 
 .panel {
@@ -94,6 +96,7 @@ button {
   border-radius: 24px;
   box-shadow: var(--shadow);
   backdrop-filter: blur(16px);
+  min-width: 0;
 }
 
 .top-nav {
@@ -102,6 +105,7 @@ button {
   justify-content: space-between;
   gap: 16px;
   padding: 10px 16px;
+  min-width: 0;
 }
 
 .nav-tabs {
@@ -195,6 +199,7 @@ button {
   padding: 22px;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .resume-panel {
@@ -561,6 +566,7 @@ button {
   justify-content: flex-end;
   gap: 16px;
   align-items: center;
+  min-width: 0;
 }
 
 .results-total {
@@ -573,6 +579,7 @@ button {
   display: grid;
   gap: 16px;
   margin-top: 18px;
+  min-width: 0;
 }
 
 .job-card {
@@ -582,6 +589,7 @@ button {
     linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(247, 249, 244, 0.96));
   border-radius: 20px;
   padding: 18px;
+  min-width: 0;
 }
 
 .job-card.selected {
@@ -606,6 +614,7 @@ button {
   gap: 8px;
   align-items: center;
   min-width: 0;
+  width: 100%;
 }
 
 .job-company {
@@ -621,6 +630,7 @@ button {
 
 .job-title {
   min-width: 0;
+  flex: 1 1 auto;
   font-weight: 800;
   white-space: nowrap;
   overflow: hidden;
@@ -631,7 +641,8 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .job-card-side-meta {
@@ -641,6 +652,9 @@ button {
   color: var(--text-subtle);
   font-size: 0.82rem;
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .job-meta-divider {
@@ -884,29 +898,47 @@ button {
     padding: 12px;
   }
 
+  .page-stack,
+  .layout {
+    gap: 10px;
+  }
+
   .layout {
     grid-template-columns: 1fr;
   }
 
+  .panel,
+  .job-card,
+  .recommend-summary,
+  .resume-placeholder,
+  .meta-card,
+  .profile-card,
+  .experience-card {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
   .search-panel {
     position: static;
+    padding: 0;
   }
 
   .results-panel {
     min-height: auto;
-  }
-
-  .resume-meta-grid,
-  .resume-profile-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .results-panel {
-    padding: 18px;
+    padding: 0;
   }
 
   .job-card {
-    padding: 16px;
+    padding: 14px 0;
+    border-bottom: 1px solid rgba(19, 38, 31, 0.1);
+  }
+
+  .job-card.selected {
+    box-shadow: none;
+    border-color: rgba(28, 108, 75, 0.3);
   }
 
   .job-card-sidegroup {
@@ -916,15 +948,70 @@ button {
   .job-card-side-meta {
     font-size: 0.78rem;
   }
+
+  .job-list {
+    gap: 0;
+    margin-top: 12px;
+  }
+
+  .checkbox-list {
+    gap: 0;
+  }
+
+  .checkbox-item {
+    background: transparent;
+    border-radius: 0;
+    padding: 8px 0;
+  }
+
+  .mobile-nav,
+  .results-panel,
+  .resume-panel {
+    padding: 0;
+  }
+
+  .mobile-nav {
+    min-height: auto;
+  }
+
+  .recommend-summary {
+    margin-top: 0;
+    padding: 0 0 14px;
+  }
+
+  .resume-placeholder {
+    padding: 0;
+  }
+
+  .recommendation-badge {
+    min-width: auto;
+    height: auto;
+    background: transparent;
+    border-radius: 0;
+  }
+
+  .resume-meta-grid,
+  .resume-profile-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 640px) {
-  .results-panel,
-  .resume-panel,
+  .app-shell {
+    padding: 10px;
+  }
+
   .drawer-panel,
   .mobile-menu-panel {
-    padding: 16px;
-    border-radius: 20px;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    padding: 10px;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
   }
 
   .panel-actions,
@@ -944,7 +1031,9 @@ button {
   }
 
   .job-card-topline {
-    align-items: start;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
   }
 
   .job-title {
@@ -952,29 +1041,25 @@ button {
   }
 
   .job-card-sidegroup {
+    width: 100%;
+    justify-content: space-between;
     gap: 6px;
+  }
+
+  .job-card-side-meta {
+    flex: 1 1 auto;
+  }
+
+  .mobile-nav .icon-button,
+  .mobile-menu-header .icon-button,
+  .drawer-header .icon-button {
+    background: transparent;
+    padding: 0;
   }
 
   .resume-meta-grid,
   .resume-profile-grid,
   .profile-stats {
     grid-template-columns: 1fr;
-  }
-
-  .drawer-panel {
-    top: auto;
-    left: 10px;
-    right: 10px;
-    bottom: 10px;
-    width: auto;
-    max-height: 82vh;
-  }
-
-  .mobile-menu-panel {
-    top: 10px;
-    left: 10px;
-    right: 10px;
-    bottom: 10px;
-    width: auto;
   }
 }
