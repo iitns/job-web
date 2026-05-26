@@ -223,28 +223,39 @@ function extractLocationLabel(value) {
   return city || compactLocation(input)
 }
 
-function summarizeLocationList(locations, fallbackValue = '') {
-  const labels = []
+function uniqueLocationValues(locations) {
+  const values = []
 
   normalizeList(locations).forEach((item) => {
+    const value = String(item || '').trim()
+    if (value && !values.includes(value)) {
+      values.push(value)
+    }
+  })
+
+  return values
+}
+
+function summarizeLocationList(locations) {
+  const labels = []
+
+  uniqueLocationValues(locations).forEach((item) => {
     const label = extractLocationLabel(item)
     if (label && !labels.includes(label)) {
       labels.push(label)
     }
   })
 
-  if (!labels.length && fallbackValue) {
-    const fallbackLabel = extractLocationLabel(fallbackValue)
-    if (fallbackLabel) {
-      labels.push(fallbackLabel)
-    }
-  }
-
   if (!labels.length) {
     return '미정'
   }
 
   return labels.length === 1 ? labels[0] : `${labels[0]} 외 ${labels.length - 1}곳`
+}
+
+function formatLocationList(locations) {
+  const values = uniqueLocationValues(locations)
+  return values.length ? values.join(' / ') : '미정'
 }
 
 function splitTextLines(value) {
@@ -507,7 +518,7 @@ function renderJobs() {
                 </div>
                 <div class="job-card-sidegroup">
                   <div class="job-card-side-meta">
-                    <span>${escapeHtml(summarizeLocationList(job.locations, job.primary_location || job.location))}</span>
+                    <span>${escapeHtml(summarizeLocationList(job.locations))}</span>
                     <span class="job-meta-divider">·</span>
                     <span>${formatCardDate(job.posted_at)}</span>
                   </div>
@@ -1009,7 +1020,7 @@ function renderDrawer() {
             </div>
             <div>
               <p class="detail-label">위치</p>
-              <p>${escapeHtml(job.location || '미정')}</p>
+              <p>${escapeHtml(formatLocationList(job.locations))}</p>
             </div>
             <div>
               <p class="detail-label">팀</p>

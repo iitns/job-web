@@ -99,7 +99,17 @@ def tokenize_text(*parts: Any) -> set[str]:
     return tokens
 
 
+def normalize_string_list(items: Any) -> list[str]:
+    values: list[str] = []
+    for item in items or []:
+        value = str(item or "").strip()
+        if value:
+            values.append(value)
+    return values
+
+
 def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
+    locations = normalize_string_list(row.get("locations"))
     summary = summarize_text(
         row.get("summary"),
         row.get("team_description"),
@@ -112,9 +122,8 @@ def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
         "company_mark": company_mark(row.get("company")),
         "company_logo_url": row.get("company_logo_url") or row.get("logo_url"),
         "title": row.get("title"),
-        "location": row.get("location"),
-        "locations": row.get("locations") or [],
-        "primary_location": row.get("location") or ", ".join(row.get("locations") or []),
+        "locations": locations,
+        "primary_location": locations[0] if locations else None,
         "level_guess": row.get("level_guess"),
         "team": row.get("team"),
         "display_team": row.get("team") or row.get("level_guess"),
@@ -226,7 +235,6 @@ def fetch_jobs_from_postgres(*, page: int, page_size: int, companies: list[str])
                     job_id,
                     company,
                     title,
-                    location,
                     locations,
                     level_guess,
                     team,
@@ -275,7 +283,6 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
             "job_id",
             "company",
             "title",
-            "location",
             "locations",
             "level_guess",
             "team",
@@ -303,7 +310,7 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
                                 "title^4",
                                 "company^3",
                                 "team^2",
-                                "location^2",
+                                "locations^2",
                                 "team_description",
                                 "responsibilities",
                                 "minimum_qualifications",
@@ -387,7 +394,6 @@ def fetch_jobs_for_recommendation(*, companies: list[str]) -> list[dict[str, Any
                     job_id,
                     company,
                     title,
-                    location,
                     locations,
                     level_guess,
                     team,
@@ -459,17 +465,17 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
         job_text_tokens = tokenize_text(
             job.get("title"),
             job.get("team"),
-            job.get("location"),
             job.get("team_description"),
             job.get("responsibilities"),
             job.get("minimum_qualifications"),
             job.get("preferred_qualifications"),
+            *(job.get("locations") or []),
             *job_skills,
             *job_domains,
         )
         token_overlap = len(profile_tokens & job_text_tokens)
         title_match = bool(tokenize_text(job.get("title"), job.get("team")) & tokenize_text(*title_hints))
-        location_match = bool(tokenize_text(job.get("location"), *(job.get("locations") or [])) & tokenize_text(*location_hints))
+        location_match = bool(tokenize_text(*(job.get("locations") or [])) & tokenize_text(*location_hints))
 
         score = (
             len(matched_skills) * 8
@@ -982,7 +988,6 @@ def job_detail(job_id: str):
                         job_id,
                         company,
                         title,
-                        location,
                         locations,
                         level_guess,
                         team,
