@@ -366,7 +366,7 @@ function formatYears(value) {
 }
 
 function resumeFilename(resume) {
-  return resume?.filename || resume?.label || '최근 이력서'
+  return resume?.original_filename || resume?.filename || resume?.label || '최근 이력서'
 }
 
 function resumeStatusLabel(resume) {
@@ -398,7 +398,24 @@ function extractedResumeText(profile) {
 }
 
 function hasExtractedResumeContent(profile) {
-  return Boolean(profile?.summary || normalizeList(profile?.skills).length || extractedResumeText(profile))
+  return Boolean(normalizeList(profile?.skills).length || extractedResumeText(profile))
+}
+
+function resumeObjectName(resume) {
+  if (resume?.minio_object_name) {
+    return resume.minio_object_name
+  }
+
+  const parts = String(resume?.minio_key || '').split('/').filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : '미기록'
+}
+
+function clearSelectedResumeRecord() {
+  state.selectedResumeRecordId = null
+  state.selectedResumeRecord = null
+  state.selectedResumeRecordProfile = null
+  state.selectedResumeRecordLoading = false
+  state.selectedResumeRecordError = ''
 }
 
 function formatExtractedTextLength(text) {
@@ -536,7 +553,7 @@ async function loadLatestResume() {
   }
 }
 
-async function loadResumeList({ selectResumeId = null, preserveSelection = true } = {}) {
+async function loadResumeList({ selectResumeId, preserveSelection = true } = {}) {
   state.resumeListLoading = true
   state.resumeListError = ''
   render()
@@ -548,7 +565,8 @@ async function loadResumeList({ selectResumeId = null, preserveSelection = true 
     state.resumeList = payload.items || []
 
     const fallbackId = preserveSelection ? previousSelectedId : null
-    const nextSelectedId = selectResumeId ?? fallbackId ?? state.resumeList[0]?.id ?? null
+    const requestedSelectedId = selectResumeId === undefined ? fallbackId : selectResumeId
+    const nextSelectedId = state.resumeList.some((item) => item.id === requestedSelectedId) ? requestedSelectedId : null
 
     state.selectedResumeRecordId = nextSelectedId
     syncSelectedResumeRecord()
@@ -556,13 +574,15 @@ async function loadResumeList({ selectResumeId = null, preserveSelection = true 
     if (!nextSelectedId) {
       state.selectedResumeRecordProfile = null
       state.selectedResumeRecordError = ''
+      state.selectedResumeRecordLoading = false
+    } else if (nextSelectedId !== previousSelectedId) {
+      state.selectedResumeRecordProfile = null
+      state.selectedResumeRecordError = ''
     }
   } catch (error) {
     state.resumeList = []
     state.resumeListError = error.message || '이력서 목록을 불러오지 못했습니다.'
-    state.selectedResumeRecordId = null
-    state.selectedResumeRecord = null
-    state.selectedResumeRecordProfile = null
+    clearSelectedResumeRecord()
   } finally {
     state.resumeListLoading = false
     render()
@@ -574,10 +594,14 @@ async function loadResumeList({ selectResumeId = null, preserveSelection = true 
 }
 
 async function loadResumeRecordDetail(resumeId) {
+  const selectingNewRecord = state.selectedResumeRecordId !== resumeId
   state.selectedResumeRecordId = resumeId
   syncSelectedResumeRecord()
   state.selectedResumeRecordLoading = true
   state.selectedResumeRecordError = ''
+  if (selectingNewRecord) {
+    state.selectedResumeRecordProfile = null
+  }
   render()
 
   try {
@@ -711,10 +735,10 @@ async function uploadResume(file) {
     applyResumePayload(payload)
     state.resumeSuccess = payload.warning
       ? `이력서를 업로드했고 MinIO에 저장했습니다. ${payload.warning}`
-      : '이력서를 업로드했고 MinIO 저장 및 Airflow DAG 트리거를 요청했습니다.'
+      : `이력서를 업로드했고 MinIO에 ${payload.resume?.minio_object_name || '새 object'}로 저장한 뒤 Airflow DAG 트리거를 요청했습니다.`
     await loadLatestResume()
     await loadResumeList({
-      selectResumeId: payload.resume?.id || null,
+      selectResumeId: null,
       preserveSelection: false,
     })
   } catch (error) {
@@ -866,27 +890,40 @@ function renderResumeManagementControls() {
 function renderResumeRecordCard(resume) {
   const isSelected = state.selectedResumeRecordId === resume.id
   const isMutating = state.resumeActionId === resume.id
-  const skills = normalizeList(resume.skills).slice(0, 8)
 
   return `
     <article class="resume-record-card ${isSelected ? 'selected' : ''}">
       <div class="resume-record-head">
-        <div class="resume-record-copy">
-          <p class="detail-label">Resume #${escapeHtml(resume.id)}</p>
-          <h3>${escapeHtml(resumeFilename(resume))}</h3>
-          <p>${escapeHtml(resume.summary_excerpt || '추출 요약이 아직 없습니다. 상태가 진행되면 여기에 요약이 표시됩니다.')}</p>
-        </div>
+        <button
+          class="resume-record-summary"
+          type="button"
+          data-resume-select="${escapeHtml(resume.id)}"
+          aria-expanded="${isSelected ? 'true' : 'false'}"
+        >
+          <div class="resume-record-copy">
+            <div class="resume-record-title-row">
+              <p class="detail-label">Resume #${escapeHtml(resume.id)}</p>
+              <span class="field-meta">${escapeHtml(formatDateTime(resume.uploaded_at || resume.created_at))}</span>
+            </div>
+            <h3>${escapeHtml(resumeFilename(resume))}</h3>
+            <div class="tag-list compact-tag-list">
+              <span class="tag-chip">${escapeHtml(resumeStatusLabel(resume))}</span>
+              <span class="tag-chip">${escapeHtml(resumeActiveLabel(resume))}</span>
+              ${resume.is_recommendation_source ? '<span class="tag-chip">추천 기준</span>' : ''}
+              ${resume.recommendation_ready ? '<span class="tag-chip">추천 준비 완료</span>' : ''}
+            </div>
+            <p class="resume-record-facts">
+              <span>추천 ${escapeHtml(`${resume.recommendation_count}건`)}</span>
+              <span>MinIO ${escapeHtml(minioStatusLabel(resume))}</span>
+              <span>Airflow ${escapeHtml(airflowStatusLabel(resume))}</span>
+            </p>
+          </div>
+          <span class="resume-record-toggle">${isSelected ? '접기' : '상세 보기'}</span>
+        </button>
 
         <div class="resume-record-actions">
           <button
-            class="secondary-button"
-            type="button"
-            data-resume-select="${escapeHtml(resume.id)}"
-          >
-            ${isSelected ? '선택됨' : '추출 내용 보기'}
-          </button>
-          <button
-            class="primary-button"
+            class="secondary-button compact-button"
             type="button"
             data-resume-active="${escapeHtml(resume.id)}"
             data-next-active="${resume.is_active ? 'false' : 'true'}"
@@ -903,48 +940,7 @@ function renderResumeRecordCard(resume) {
         </div>
       </div>
 
-      <div class="tag-list">
-        <span class="tag-chip">${escapeHtml(resumeStatusLabel(resume))}</span>
-        <span class="tag-chip">${escapeHtml(resumeActiveLabel(resume))}</span>
-        ${resume.is_recommendation_source ? '<span class="tag-chip">추천 기준</span>' : ''}
-        ${resume.recommendation_ready ? '<span class="tag-chip">추천 준비 완료</span>' : ''}
-      </div>
-
-      <div class="resume-stage-grid">
-        <div class="resume-stage-item">
-          <span class="detail-label">업로드</span>
-          <strong>${escapeHtml(formatDateTime(resume.uploaded_at || resume.created_at))}</strong>
-        </div>
-        <div class="resume-stage-item">
-          <span class="detail-label">MinIO</span>
-          <strong>${escapeHtml(minioStatusLabel(resume))}</strong>
-          <p>${escapeHtml(formatDateTime(resume.minio_uploaded_at))}</p>
-        </div>
-        <div class="resume-stage-item">
-          <span class="detail-label">Airflow</span>
-          <strong>${escapeHtml(airflowStatusLabel(resume))}</strong>
-          <p>${escapeHtml(resume.dag_run_id || '미기록')}</p>
-        </div>
-        <div class="resume-stage-item">
-          <span class="detail-label">현재 상태</span>
-          <strong>${escapeHtml(resumeStatusLabel(resume))}</strong>
-          <p>${escapeHtml(formatDateTime(resume.status_updated_at || resume.uploaded_at))}</p>
-        </div>
-        <div class="resume-stage-item">
-          <span class="detail-label">추천 결과</span>
-          <strong>${escapeHtml(`${resume.recommendation_count}건`)}</strong>
-          <p>${escapeHtml(formatDateTime(resume.last_ranked_at))}</p>
-        </div>
-      </div>
-
-      <div class="job-chip-row resume-chip-row">
-        <span class="job-chip-label">Skills</span>
-        <div class="inline-chip-list">
-          ${renderInlineChips(skills, '추출 스킬 없음')}
-        </div>
-      </div>
-
-      ${resume.last_error ? `<div class="inline-message error">${escapeHtml(resume.last_error)}</div>` : ''}
+      ${isSelected ? renderSelectedResumeRecordDetail() : resume.last_error ? `<div class="inline-message error compact-message">${escapeHtml(resume.last_error)}</div>` : ''}
     </article>
   `
 }
@@ -973,7 +969,6 @@ function renderSelectedResumeRecordDetail() {
   const resume = state.selectedResumeRecord
   const profile = state.selectedResumeRecordProfile
   const profileSkills = normalizeList(profile?.skills)
-  const profileSummary = profile?.summary || ''
   const rawText = extractedResumeText(profile)
   const hasContent = hasExtractedResumeContent(profile)
 
@@ -983,12 +978,9 @@ function renderSelectedResumeRecordDetail() {
 
   return `
     <section class="resume-detail-section">
-      <div class="section-header">
-        <div>
-          <p class="eyebrow">Resume Detail</p>
-          <h3>${escapeHtml(resumeFilename(resume))}</h3>
-        </div>
-        <button class="secondary-button" type="button" data-resume-refresh>목록 새로고침</button>
+      <div class="resume-detail-toolbar">
+        <p class="eyebrow">Resume Detail</p>
+        <button class="secondary-button compact-button" type="button" data-resume-refresh>새로고침</button>
       </div>
 
       ${
@@ -1003,28 +995,40 @@ function renderSelectedResumeRecordDetail() {
           : ''
       }
 
-      <div class="resume-meta-grid">
-        <div class="meta-card">
+      <div class="resume-meta-grid compact-meta-grid">
+        <div class="meta-card compact-meta-card">
           <p class="detail-label">현재 상태</p>
           <p>${escapeHtml(resumeStatusLabel(resume))}</p>
+          <span class="field-meta">${escapeHtml(formatDateTime(resume.status_updated_at || resume.uploaded_at))}</span>
         </div>
-        <div class="meta-card">
+        <div class="meta-card compact-meta-card">
           <p class="detail-label">활성 여부</p>
           <p>${escapeHtml(resumeActiveLabel(resume))}</p>
+          <span class="field-meta">${escapeHtml(recommendationStatusLabel(resume))}</span>
         </div>
-        <div class="meta-card">
+        <div class="meta-card compact-meta-card">
+          <p class="detail-label">원본 파일명</p>
+          <p class="mono-text">${escapeHtml(resumeFilename(resume))}</p>
+        </div>
+        <div class="meta-card compact-meta-card">
           <p class="detail-label">MinIO Object</p>
-          <p class="mono-text">${escapeHtml(resume.minio_key || '미기록')}</p>
+          <p class="mono-text">${escapeHtml(resumeObjectName(resume))}</p>
+          <span class="field-meta mono-text">${escapeHtml(resume.minio_key || '미기록')}</span>
         </div>
-        <div class="meta-card">
+        <div class="meta-card compact-meta-card">
           <p class="detail-label">DAG Run ID</p>
           <p class="mono-text">${escapeHtml(resume.dag_run_id || '미기록')}</p>
+        </div>
+        <div class="meta-card compact-meta-card">
+          <p class="detail-label">추천 결과</p>
+          <p>${escapeHtml(`${resume.recommendation_count}건`)}</p>
+          <span class="field-meta">${escapeHtml(formatDateTime(resume.last_ranked_at))}</span>
         </div>
       </div>
 
       ${
         !hasContent && !state.selectedResumeRecordLoading
-          ? `<div class="resume-placeholder">${escapeHtml(state.selectedResumeRecordError || resume.last_error || '아직 추출된 내용이 없습니다. 상태가 진행되면 요약과 원문이 여기에 표시됩니다.')}</div>`
+          ? `<div class="resume-placeholder">${escapeHtml(state.selectedResumeRecordError || resume.last_error || '아직 추출된 내용이 없습니다. 상태가 진행되면 추출 스킬과 원문이 여기에 표시됩니다.')}</div>`
           : ''
       }
 
@@ -1032,13 +1036,7 @@ function renderSelectedResumeRecordDetail() {
         hasContent
           ? `
             <div class="resume-profile-grid resume-extract-grid">
-              <section class="profile-card profile-card-main">
-                <p class="eyebrow">Summary</p>
-                <h3>${escapeHtml(resumeFilename(resume))}</h3>
-                <p class="profile-summary">${escapeHtml(profileSummary || '요약이 아직 없습니다.')}</p>
-              </section>
-
-              <section class="profile-card">
+              <section class="profile-card compact-profile-card">
                 <div class="field-row">
                   <span class="field-label">Skills</span>
                   <span class="field-meta">${profileSkills.length}개</span>
@@ -1046,7 +1044,7 @@ function renderSelectedResumeRecordDetail() {
                 ${renderTagList(profileSkills)}
               </section>
 
-              <section class="profile-card">
+              <section class="profile-card compact-profile-card">
                 <div class="field-row">
                   <span class="field-label">원문 길이</span>
                   <span class="field-meta">${escapeHtml(formatExtractedTextLength(rawText))}</span>
@@ -1054,7 +1052,7 @@ function renderSelectedResumeRecordDetail() {
                 <p class="profile-summary">${escapeHtml(formatExtractedLineCount(rawText))}</p>
               </section>
 
-              <section class="profile-card raw-text-card">
+              <section class="profile-card raw-text-card compact-profile-card">
                 <div class="field-row">
                   <span class="field-label">Extracted Text</span>
                   <span class="field-meta">${escapeHtml(formatExtractedTextLength(rawText))}</span>
@@ -1624,6 +1622,11 @@ function bindEvents() {
         return
       }
       state.mobileMenuOpen = false
+      if (state.selectedResumeRecordId === resumeId) {
+        clearSelectedResumeRecord()
+        render()
+        return
+      }
       loadResumeRecordDetail(resumeId)
     })
   })

@@ -325,8 +325,7 @@ button {
   align-items: start;
 }
 
-.resume-list-section,
-.resume-detail-section {
+.resume-list-section {
   margin-top: 28px;
 }
 
@@ -364,12 +363,8 @@ button {
 .experience-card {
   border: 1px solid rgba(19, 38, 31, 0.08);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(247, 249, 244, 0.96));
-  border-radius: 24px;
-  padding: 20px;
-}
-
-.profile-card-main {
-  grid-column: 1 / -1;
+  border-radius: 20px;
+  padding: 18px;
 }
 
 .raw-text-card {
@@ -457,28 +452,46 @@ button {
 }
 
 .resume-record-list {
-  display: grid;
-  gap: 16px;
   margin-top: 18px;
+  border: 1px solid rgba(19, 38, 31, 0.08);
+  border-radius: 24px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(247, 249, 244, 0.96));
 }
 
 .resume-record-card {
-  border: 1px solid rgba(19, 38, 31, 0.08);
-  border-radius: 24px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(247, 249, 244, 0.96));
-  padding: 20px;
+  border-bottom: 1px solid rgba(19, 38, 31, 0.08);
+  background: transparent;
+}
+
+.resume-record-card:last-child {
+  border-bottom: none;
 }
 
 .resume-record-card.selected {
-  border-color: rgba(28, 108, 75, 0.42);
-  box-shadow: 0 12px 30px rgba(28, 108, 75, 0.1);
+  background: rgba(246, 249, 244, 0.78);
 }
 
 .resume-record-head {
   display: flex;
   justify-content: space-between;
-  align-items: start;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.resume-record-summary {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
 }
 
 .resume-record-copy {
@@ -486,51 +499,110 @@ button {
   flex: 1;
 }
 
-.resume-record-copy h3 {
-  margin: 8px 0 0;
-  font-size: 1.15rem;
+.resume-record-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
-.resume-record-copy p:last-child {
-  margin: 12px 0 0;
+.resume-record-copy h3 {
+  margin: 6px 0 0;
+  font-size: 1rem;
+  line-height: 1.35;
+}
+
+.compact-tag-list {
+  margin-top: 10px;
+  gap: 8px;
+}
+
+.compact-tag-list .tag-chip {
+  padding: 6px 10px;
+  font-size: 0.78rem;
+}
+
+.resume-record-facts {
+  margin: 10px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
   color: var(--text-subtle);
+  font-size: 0.84rem;
+}
+
+.resume-record-toggle {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--primary);
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .resume-record-actions {
   display: flex;
+  align-items: center;
+}
+
+.compact-button {
+  padding: 10px 14px;
+  font-size: 0.84rem;
+}
+
+.compact-message {
+  margin: 0 16px 16px;
+}
+
+.resume-detail-section {
+  margin-top: 0;
+  padding: 0 16px 16px;
+  border-top: 1px solid rgba(19, 38, 31, 0.08);
+}
+
+.resume-detail-toolbar {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
-.resume-stage-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 18px;
+.compact-meta-grid {
+  margin-top: 12px;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.resume-stage-item {
-  border: 1px solid rgba(19, 38, 31, 0.08);
-  background: rgba(255, 255, 255, 0.76);
+.compact-meta-card {
+  border-radius: 18px;
+  padding: 14px;
+}
+
+.compact-meta-card p {
+  margin: 4px 0 0;
+}
+
+.compact-meta-card .field-meta {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.78rem;
+}
+
+.compact-profile-card {
   border-radius: 18px;
   padding: 16px;
 }
 
-.resume-stage-item strong {
-  display: block;
-  margin-top: 6px;
+.compact-profile-card .profile-summary {
+  margin-top: 10px;
 }
 
-.resume-stage-item p {
-  margin: 8px 0 0;
-  color: var(--text-subtle);
+.compact-profile-card .raw-text-block {
+  margin-top: 12px;
+  padding: 14px;
+  max-height: 320px;
   font-size: 0.86rem;
-  word-break: break-word;
-}
-
-.resume-chip-row {
-  margin-top: 16px;
 }
 
 .compact {
@@ -1143,7 +1215,8 @@ button {
 
   .resume-meta-grid,
   .resume-profile-grid,
-  .resume-stage-grid {
+  .resume-stage-grid,
+  .compact-meta-grid {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -1172,10 +1245,32 @@ button {
   .resume-hero,
   .resume-hero-actions,
   .resume-record-head,
-  .resume-record-actions,
   .section-header,
   .resume-list-tools {
     flex-direction: column;
+  }
+
+  .resume-record-summary,
+  .resume-detail-toolbar,
+  .resume-record-actions {
+    width: 100%;
+  }
+
+  .resume-record-summary {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .resume-record-toggle {
+    align-self: flex-start;
+  }
+
+  .resume-record-actions {
+    align-items: stretch;
+  }
+
+  .resume-record-actions .compact-button {
+    width: 100%;
   }
 
   .detail-grid {
@@ -1244,7 +1339,20 @@ button {
   .resume-meta-grid,
   .resume-profile-grid,
   .profile-stats,
-  .resume-stage-grid {
+  .resume-stage-grid,
+  .compact-meta-grid {
     grid-template-columns: 1fr;
+  }
+
+  .resume-record-list {
+    border-radius: 20px;
+  }
+
+  .resume-detail-section {
+    padding: 0 12px 12px;
+  }
+
+  .compact-message {
+    margin: 0 12px 12px;
   }
 }

@@ -4,6 +4,7 @@ DROP TABLE IF EXISTS job_web_resumes;
 CREATE TABLE IF NOT EXISTS resumes (
     id                  BIGSERIAL PRIMARY KEY,
     label               TEXT NOT NULL DEFAULT 'default',
+    original_filename   TEXT NOT NULL DEFAULT 'default',
     status              TEXT NOT NULL DEFAULT 'pending',
     minio_key           TEXT,
     minio_uploaded_at   TIMESTAMPTZ,
@@ -23,6 +24,13 @@ ALTER TABLE resumes ADD COLUMN IF NOT EXISTS label TEXT;
 UPDATE resumes SET label = 'default' WHERE label IS NULL;
 ALTER TABLE resumes ALTER COLUMN label SET DEFAULT 'default';
 ALTER TABLE resumes ALTER COLUMN label SET NOT NULL;
+
+ALTER TABLE resumes ADD COLUMN IF NOT EXISTS original_filename TEXT;
+UPDATE resumes
+SET original_filename = COALESCE(NULLIF(label, ''), 'default')
+WHERE original_filename IS NULL;
+ALTER TABLE resumes ALTER COLUMN original_filename SET DEFAULT 'default';
+ALTER TABLE resumes ALTER COLUMN original_filename SET NOT NULL;
 
 ALTER TABLE resumes ADD COLUMN IF NOT EXISTS uploaded_at TIMESTAMPTZ;
 UPDATE resumes SET uploaded_at = NOW() WHERE uploaded_at IS NULL;

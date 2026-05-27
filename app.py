@@ -233,15 +233,18 @@ def serialize_resume(row: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
 
     status = derive_resume_status(row)
-    summary = summarize_text(row.get("summary"), limit=180)
     skills = normalize_string_list(row.get("skills"))
+    original_filename = row.get("original_filename") or row.get("label")
+    minio_key = row.get("minio_key")
     return {
         "id": row.get("id"),
         "label": row.get("label"),
-        "filename": row.get("label"),
+        "filename": original_filename,
+        "original_filename": original_filename,
         "status": status,
         "status_label": RESUME_STATUS_LABELS.get(status, status),
-        "minio_key": row.get("minio_key"),
+        "minio_key": minio_key,
+        "minio_object_name": Path(str(minio_key)).name if minio_key else None,
         "uploaded_at": serialize_datetime(row.get("uploaded_at")),
         "created_at": serialize_datetime(row.get("uploaded_at")),
         "minio_uploaded_at": serialize_datetime(row.get("minio_uploaded_at")),
@@ -253,7 +256,6 @@ def serialize_resume(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "recommendation_ready": resume_ready_for_recommendations(row),
         "recommendation_count": int(row.get("recommendation_count") or 0),
         "last_ranked_at": serialize_datetime(row.get("latest_ranked_at")),
-        "summary_excerpt": summary,
         "skills": skills,
         "has_raw_text": bool(str(row.get("raw_text") or "").strip()),
         "has_embedding": row.get("content_embedding") is not None,
@@ -477,6 +479,7 @@ def fetch_resume_record(*, resume_id: int | None = None, latest: bool = False) -
                 SELECT
                     r.id,
                     r.label,
+                    r.original_filename,
                     r.status,
                     r.minio_key,
                     r.minio_uploaded_at,
@@ -526,6 +529,7 @@ def fetch_resume_records() -> list[dict[str, Any]]:
                 SELECT
                     r.id,
                     r.label,
+                    r.original_filename,
                     r.status,
                     r.minio_key,
                     r.minio_uploaded_at,
@@ -575,6 +579,7 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
                 SELECT
                     r.id,
                     r.label,
+                    r.original_filename,
                     r.status,
                     r.minio_key,
                     r.minio_uploaded_at,
@@ -715,7 +720,12 @@ def ensure_resume_bucket(client: Minio) -> None:
 
 def resume_object_key(resume_id: int, filename: str) -> str:
     safe_name = secure_filename(filename or "resume.docx") or "resume.docx"
-    return f"resumes/{resume_id}/{safe_name}"
+    safe_path = Path(safe_name)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    stem = safe_path.stem or "resume"
+    suffix = safe_path.suffix.lower() or ".docx"
+    object_name = f"{timestamp}-{stem}{suffix}"
+    return f"resumes/{resume_id}/{object_name}"
 
 
 def upload_resume_object(*, resume_id: int, filename: str, data: bytes) -> str:
@@ -744,16 +754,16 @@ def delete_resume_object(object_key: str | None) -> None:
             raise
 
 
-def create_resume_record(*, label: str) -> int:
+def create_resume_record(*, label: str, original_filename: str) -> int:
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO resumes (label, status)
-                VALUES (%s, 'pending')
+                INSERT INTO resumes (label, original_filename, status)
+                VALUES (%s, %s, 'pending')
                 RETURNING id
                 """,
-                (label,),
+                (label, original_filename),
             )
             resume_id = cur.fetchone()[0]
         conn.commit()
@@ -993,7 +1003,10 @@ def upload_resume():
     if not data:
         return jsonify({"error": "empty_file", "message": "The uploaded DOCX file is empty."}), 400
 
-    resume_id = create_resume_record(label=file_storage.filename)
+    resume_id = create_resume_record(
+        label=file_storage.filename,
+        original_filename=file_storage.filename,
+    )
     object_key: str | None = None
 
     try:
