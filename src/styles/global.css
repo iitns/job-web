@@ -230,6 +230,13 @@ button {
   align-items: start;
 }
 
+.resume-hero-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .resume-status {
   display: inline-flex;
   align-items: center;
@@ -314,6 +321,35 @@ button {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.resume-extract-grid {
+  align-items: start;
+}
+
+.resume-list-section,
+.resume-detail-section {
+  margin-top: 28px;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 16px;
+}
+
+.section-header h3 {
+  margin: 8px 0 0;
+  font-size: 1.45rem;
+}
+
+.resume-list-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .control-stack {
   display: grid;
   gap: 18px;
@@ -336,6 +372,16 @@ button {
   grid-column: 1 / -1;
 }
 
+.raw-text-card {
+  grid-column: 1 / -1;
+}
+
+.mono-text {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.86rem;
+  word-break: break-word;
+}
+
 .profile-card h3 {
   margin: 8px 0 0;
   font-size: 1.5rem;
@@ -349,6 +395,21 @@ button {
 .profile-summary {
   margin: 16px 0 0;
   color: var(--text-subtle);
+}
+
+.raw-text-block {
+  margin: 16px 0 0;
+  padding: 18px;
+  border-radius: 20px;
+  background: rgba(246, 249, 244, 0.96);
+  color: #17362b;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  max-height: 420px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.92rem;
+  line-height: 1.65;
 }
 
 .profile-stats {
@@ -393,6 +454,83 @@ button {
 .experience-card p {
   margin: 0 0 12px;
   color: var(--text-subtle);
+}
+
+.resume-record-list {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.resume-record-card {
+  border: 1px solid rgba(19, 38, 31, 0.08);
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(247, 249, 244, 0.96));
+  padding: 20px;
+}
+
+.resume-record-card.selected {
+  border-color: rgba(28, 108, 75, 0.42);
+  box-shadow: 0 12px 30px rgba(28, 108, 75, 0.1);
+}
+
+.resume-record-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 16px;
+}
+
+.resume-record-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.resume-record-copy h3 {
+  margin: 8px 0 0;
+  font-size: 1.15rem;
+}
+
+.resume-record-copy p:last-child {
+  margin: 12px 0 0;
+  color: var(--text-subtle);
+}
+
+.resume-record-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.resume-stage-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.resume-stage-item {
+  border: 1px solid rgba(19, 38, 31, 0.08);
+  background: rgba(255, 255, 255, 0.76);
+  border-radius: 18px;
+  padding: 16px;
+}
+
+.resume-stage-item strong {
+  display: block;
+  margin-top: 6px;
+}
+
+.resume-stage-item p {
+  margin: 8px 0 0;
+  color: var(--text-subtle);
+  font-size: 0.86rem;
+  word-break: break-word;
+}
+
+.resume-chip-row {
+  margin-top: 16px;
 }
 
 .compact {
@@ -1004,7 +1142,8 @@ button {
   }
 
   .resume-meta-grid,
-  .resume-profile-grid {
+  .resume-profile-grid,
+  .resume-stage-grid {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -1030,7 +1169,12 @@ button {
   .panel-actions,
   .pagination,
   .resume-upload-form,
-  .resume-hero {
+  .resume-hero,
+  .resume-hero-actions,
+  .resume-record-head,
+  .resume-record-actions,
+  .section-header,
+  .resume-list-tools {
     flex-direction: column;
   }
 
@@ -1099,7 +1243,8 @@ button {
 
   .resume-meta-grid,
   .resume-profile-grid,
-  .profile-stats {
+  .profile-stats,
+  .resume-stage-grid {
     grid-template-columns: 1fr;
   }
 }

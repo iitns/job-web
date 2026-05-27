@@ -49,10 +49,14 @@ ALLOWED_RESUME_EXTENSIONS = {".docx"}
 RESUME_SCHEMA_PATH = BASE_DIR / "migrations" / "001_create_job_web_resume_tables.sql"
 
 RESUME_STATUS_LABELS = {
-    "queued": "대기 중",
-    "processing": "처리 중",
-    "ready": "추천 준비 완료",
-    "pending": "미등록",
+    "pending": "트리거 대기",
+    "extracting": "텍스트 추출 중",
+    "extracted": "텍스트 추출 완료",
+    "embedding": "임베딩 생성 중",
+    "embedded": "임베딩 생성 완료",
+    "scoring": "추천 점수 계산 중",
+    "done": "추천 계산 완료",
+    "failed": "처리 실패",
 }
 
 
@@ -132,28 +136,56 @@ def serialize_datetime(value: Any) -> str | None:
 
 
 def derive_resume_status(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or "").strip().lower()
+    if status == "failed":
+        return status
     if int(row.get("recommendation_count") or 0) > 0:
-        return "ready"
-    if row.get("content_embedding") or row.get("raw_text"):
-        return "processing"
+        return "done"
+    if status in RESUME_STATUS_LABELS:
+        return status
+    if row.get("content_embedding") is not None:
+        return "embedded"
+    if str(row.get("raw_text") or "").strip():
+        return "extracted"
     if row.get("minio_key"):
-        return "queued"
+        return "pending"
     return "pending"
+
+
+def resume_ready_for_recommendations(row: dict[str, Any] | None) -> bool:
+    if not row:
+        return False
+
+    return derive_resume_status(row) == "done" or int(row.get("recommendation_count") or 0) > 0
 
 
 def build_resume_message(row: dict[str, Any] | None) -> str | None:
     if not row:
         return None
 
-    if int(row.get("recommendation_count") or 0) > 0:
+    status = derive_resume_status(row)
+    last_error = str(row.get("last_error") or "").strip()
+    if status == "failed" and last_error:
+        return last_error
+
+    if resume_ready_for_recommendations(row):
         return None
     if not row.get("minio_key"):
         return "이력서를 먼저 업로드해 주세요."
-    if not row.get("raw_text"):
-        return "이력서 업로드가 완료되었습니다. Airflow에서 텍스트 추출을 진행 중입니다."
-    if not row.get("content_embedding"):
-        return "이력서 텍스트 추출이 끝났고 임베딩을 생성 중입니다."
-    return "추천 결과를 생성 중입니다."
+    if last_error:
+        return last_error
+
+    messages = {
+        "pending": "MinIO 저장은 완료되었습니다. Airflow DAG의 다음 처리를 기다리는 중입니다.",
+        "extracting": "이력서 텍스트를 추출하는 중입니다.",
+        "extracted": "텍스트 추출이 완료되었습니다. 임베딩 작업을 기다리는 중입니다.",
+        "embedding": "이력서 임베딩을 생성하는 중입니다.",
+        "embedded": "임베딩 생성이 완료되었습니다. 추천 점수 계산을 기다리는 중입니다.",
+        "scoring": "공고 추천 점수를 계산하는 중입니다.",
+        "failed": "이력서 처리에 실패했습니다.",
+        "done": None,
+    }
+    return messages.get(status, "이력서 처리 상태를 확인하는 중입니다.")
 
 
 def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
@@ -201,6 +233,8 @@ def serialize_resume(row: dict[str, Any] | None) -> dict[str, Any] | None:
         return None
 
     status = derive_resume_status(row)
+    summary = summarize_text(row.get("summary"), limit=180)
+    skills = normalize_string_list(row.get("skills"))
     return {
         "id": row.get("id"),
         "label": row.get("label"),
@@ -210,22 +244,33 @@ def serialize_resume(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "minio_key": row.get("minio_key"),
         "uploaded_at": serialize_datetime(row.get("uploaded_at")),
         "created_at": serialize_datetime(row.get("uploaded_at")),
-        "recommendation_ready": int(row.get("recommendation_count") or 0) > 0,
+        "minio_uploaded_at": serialize_datetime(row.get("minio_uploaded_at")),
+        "dag_run_id": row.get("dag_run_id"),
+        "dag_triggered_at": serialize_datetime(row.get("dag_triggered_at")),
+        "status_updated_at": serialize_datetime(row.get("status_updated_at")),
+        "last_error": row.get("last_error"),
+        "is_active": bool(row.get("is_active", True)),
+        "recommendation_ready": resume_ready_for_recommendations(row),
         "recommendation_count": int(row.get("recommendation_count") or 0),
         "last_ranked_at": serialize_datetime(row.get("latest_ranked_at")),
+        "summary_excerpt": summary,
+        "skills": skills,
+        "has_raw_text": bool(str(row.get("raw_text") or "").strip()),
+        "has_embedding": row.get("content_embedding") is not None,
     }
 
 
-def serialize_resume_profile(row: dict[str, Any] | None) -> dict[str, Any] | None:
+def serialize_resume_profile(row: dict[str, Any] | None, *, include_raw_text: bool = False) -> dict[str, Any] | None:
     if not row:
         return None
 
     summary = summarize_text(row.get("summary"), limit=420)
     skills = normalize_string_list(row.get("skills"))
-    if not summary and not skills:
+    raw_text = str(row.get("raw_text") or "").strip()
+    if not summary and not skills and not raw_text:
         return None
 
-    return {
+    profile = {
         "resume_id": row.get("id"),
         "candidate_name": None,
         "summary": summary,
@@ -235,6 +280,11 @@ def serialize_resume_profile(row: dict[str, Any] | None) -> dict[str, Any] | Non
         "experience_items": [],
         "projects": [],
     }
+
+    if include_raw_text:
+        profile["raw_text"] = raw_text or None
+
+    return profile
 
 
 def fetch_company_options(conn) -> list[str]:
@@ -427,7 +477,13 @@ def fetch_resume_record(*, resume_id: int | None = None, latest: bool = False) -
                 SELECT
                     r.id,
                     r.label,
+                    r.status,
                     r.minio_key,
+                    r.minio_uploaded_at,
+                    r.dag_run_id,
+                    r.dag_triggered_at,
+                    r.last_error,
+                    r.status_updated_at,
                     r.raw_text,
                     r.skills,
                     r.summary,
@@ -462,6 +518,51 @@ def fetch_resume_and_profile(*, resume_id: int | None = None, latest: bool = Fal
     return resume, profile
 
 
+def fetch_resume_records() -> list[dict[str, Any]]:
+    with db_connect() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT
+                    r.id,
+                    r.label,
+                    r.status,
+                    r.minio_key,
+                    r.minio_uploaded_at,
+                    r.dag_run_id,
+                    r.dag_triggered_at,
+                    r.last_error,
+                    r.status_updated_at,
+                    r.raw_text,
+                    r.skills,
+                    r.summary,
+                    r.content_embedding,
+                    r.uploaded_at,
+                    r.is_active,
+                    COALESCE(stats.recommendation_count, 0) AS recommendation_count,
+                    stats.latest_ranked_at
+                FROM resumes r
+                LEFT JOIN (
+                    SELECT
+                        resume_id,
+                        COUNT(*) AS recommendation_count,
+                        MAX(ranked_at) AS latest_ranked_at
+                    FROM resume_job_recommendations
+                    GROUP BY resume_id
+                ) stats ON stats.resume_id = r.id
+                ORDER BY r.uploaded_at DESC, r.id DESC
+                """
+            )
+            rows = cur.fetchall()
+
+    items = [serialize_resume(dict(row)) for row in rows]
+    recommendation_source_id = next((item["id"] for item in items if item and item.get("is_active")), None)
+    for item in items:
+        if item:
+            item["is_recommendation_source"] = item.get("id") == recommendation_source_id
+    return [item for item in items if item]
+
+
 def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str]) -> dict[str, Any]:
     offset = (page - 1) * page_size
 
@@ -474,7 +575,13 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
                 SELECT
                     r.id,
                     r.label,
+                    r.status,
                     r.minio_key,
+                    r.minio_uploaded_at,
+                    r.dag_run_id,
+                    r.dag_triggered_at,
+                    r.last_error,
+                    r.status_updated_at,
                     r.raw_text,
                     r.skills,
                     r.summary,
@@ -500,10 +607,10 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
             resume = cur.fetchone()
 
             if not resume:
-                raise ValueError("추천을 사용하려면 먼저 최신 이력서를 업로드해 주세요.")
+                raise ValueError("추천을 사용하려면 활성 이력서를 업로드하거나 활성화해 주세요.")
 
             resume_dict = dict(resume)
-            if int(resume_dict.get("recommendation_count") or 0) <= 0:
+            if not resume_ready_for_recommendations(resume_dict):
                 return {
                     "jobs": [],
                     "total": 0,
@@ -642,8 +749,8 @@ def create_resume_record(*, label: str) -> int:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO resumes (label)
-                VALUES (%s)
+                INSERT INTO resumes (label, status)
+                VALUES (%s, 'pending')
                 RETURNING id
                 """,
                 (label,),
@@ -659,10 +766,58 @@ def update_resume_minio_key(*, resume_id: int, minio_key: str) -> None:
             cur.execute(
                 """
                 UPDATE resumes
-                SET minio_key = %s
+                SET
+                    minio_key = %s,
+                    minio_uploaded_at = NOW(),
+                    last_error = NULL
                 WHERE id = %s
                 """,
                 (minio_key, resume_id),
+            )
+        conn.commit()
+
+
+def update_resume_dag_trigger(*, resume_id: int, dag_run_id: str | None) -> None:
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE resumes
+                SET
+                    dag_run_id = %s,
+                    dag_triggered_at = NOW(),
+                    last_error = NULL
+                WHERE id = %s
+                """,
+                (dag_run_id, resume_id),
+            )
+        conn.commit()
+
+
+def update_resume_error(*, resume_id: int, message: str) -> None:
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE resumes
+                SET last_error = %s
+                WHERE id = %s
+                """,
+                (message, resume_id),
+            )
+        conn.commit()
+
+
+def update_resume_active_flag(*, resume_id: int, is_active: bool) -> None:
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE resumes
+                SET is_active = %s
+                WHERE id = %s
+                """,
+                (is_active, resume_id),
             )
         conn.commit()
 
@@ -844,29 +999,49 @@ def upload_resume():
     try:
         object_key = upload_resume_object(resume_id=resume_id, filename=file_storage.filename, data=data)
         update_resume_minio_key(resume_id=resume_id, minio_key=object_key)
-        dag_run = trigger_resume_dag(resume_id)
-
-        resume, profile = fetch_resume_and_profile(resume_id=resume_id)
-        return jsonify(
-            {
-                "resume": serialize_resume(resume),
-                "profile": serialize_resume_profile(profile),
-                "recommendation_ready": False,
-                "message": build_resume_message(resume),
-                "dag_run_id": dag_run.get("dag_run_id"),
-            }
-        ), 202
     except Exception as exc:
-        logger.exception("Failed to upload and queue resume")
-        try:
-            delete_resume_object(object_key)
-        except Exception:
-            logger.exception("Failed to delete resume object during rollback")
+        logger.exception("Failed to upload resume to MinIO")
         try:
             delete_resume_record(resume_id=resume_id)
         except Exception:
-            logger.exception("Failed to delete resume row during rollback")
+            logger.exception("Failed to delete resume row during MinIO rollback")
         return jsonify({"error": "resume_upload_failed", "message": str(exc)}), 500
+
+    dag_run_id = None
+    dag_triggered = False
+    warning_message = None
+
+    try:
+        dag_run = trigger_resume_dag(resume_id)
+        dag_run_id = dag_run.get("dag_run_id")
+        update_resume_dag_trigger(resume_id=resume_id, dag_run_id=dag_run_id)
+        dag_triggered = True
+    except Exception as exc:
+        logger.exception("Failed to trigger Airflow DAG for resume %s", resume_id)
+        warning_message = "MinIO 저장은 완료되었지만 Airflow DAG 트리거에 실패했습니다. 설정을 확인해 주세요."
+        update_resume_error(
+            resume_id=resume_id,
+            message=f"Airflow DAG 트리거 실패: {exc}",
+        )
+
+    resume, profile = fetch_resume_and_profile(resume_id=resume_id)
+    return jsonify(
+        {
+            "resume": serialize_resume(resume),
+            "profile": serialize_resume_profile(profile),
+            "recommendation_ready": resume_ready_for_recommendations(resume),
+            "message": warning_message or build_resume_message(resume),
+            "dag_run_id": dag_run_id,
+            "dag_triggered": dag_triggered,
+            "warning": warning_message,
+        }
+    ), 202
+
+
+@app.get("/api/resumes")
+def list_resumes():
+    ensure_runtime_state()
+    return jsonify({"items": fetch_resume_records()})
 
 
 @app.get("/api/resumes/latest")
@@ -879,7 +1054,24 @@ def latest_resume():
         {
             "resume": serialize_resume(resume),
             "profile": serialize_resume_profile(profile),
-            "recommendation_ready": int(resume.get("recommendation_count") or 0) > 0,
+            "recommendation_ready": resume_ready_for_recommendations(resume),
+            "message": build_resume_message(resume),
+        }
+    )
+
+
+@app.get("/api/resumes/latest/profile")
+def latest_resume_profile():
+    ensure_runtime_state()
+    resume, profile = fetch_resume_and_profile(latest=True)
+    if not resume:
+        return jsonify({"error": "resume_not_found"}), 404
+
+    return jsonify(
+        {
+            "resume": serialize_resume(resume),
+            "profile": serialize_resume_profile(profile, include_raw_text=True),
+            "recommendation_ready": resume_ready_for_recommendations(resume),
             "message": build_resume_message(resume),
         }
     )
@@ -895,7 +1087,7 @@ def get_resume(resume_id: int):
         {
             "resume": serialize_resume(resume),
             "profile": serialize_resume_profile(profile),
-            "recommendation_ready": int(resume.get("recommendation_count") or 0) > 0,
+            "recommendation_ready": resume_ready_for_recommendations(resume),
             "message": build_resume_message(resume),
         }
     )
@@ -910,9 +1102,33 @@ def get_resume_profile(resume_id: int):
     return jsonify(
         {
             "resume": serialize_resume(resume),
-            "profile": serialize_resume_profile(profile),
-            "recommendation_ready": int(resume.get("recommendation_count") or 0) > 0,
+            "profile": serialize_resume_profile(profile, include_raw_text=True),
+            "recommendation_ready": resume_ready_for_recommendations(resume),
             "message": build_resume_message(resume),
+        }
+    )
+
+
+@app.patch("/api/resumes/<int:resume_id>")
+def update_resume(resume_id: int):
+    ensure_runtime_state()
+    payload = request.get_json(silent=True) or {}
+    if "is_active" not in payload:
+        return jsonify({"error": "invalid_payload", "message": "is_active is required."}), 400
+
+    resume = fetch_resume_record(resume_id=resume_id)
+    if not resume:
+        return jsonify({"error": "resume_not_found"}), 404
+
+    update_resume_active_flag(resume_id=resume_id, is_active=bool(payload.get("is_active")))
+
+    updated_resume, profile = fetch_resume_and_profile(resume_id=resume_id)
+    return jsonify(
+        {
+            "resume": serialize_resume(updated_resume),
+            "profile": serialize_resume_profile(profile),
+            "recommendation_ready": resume_ready_for_recommendations(updated_resume),
+            "message": build_resume_message(updated_resume),
         }
     )
 
