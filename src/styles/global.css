@@ -819,7 +819,8 @@ button {
 
 .primary-button,
 .secondary-button,
-.icon-button {
+.icon-button,
+.favorite-button {
   border: none;
   border-radius: 999px;
   padding: 12px 18px;
@@ -834,6 +835,7 @@ button {
 .primary-button:hover,
 .secondary-button:hover,
 .icon-button:hover,
+.favorite-button:hover,
 .job-card:hover {
   transform: translateY(-1px);
 }
@@ -849,7 +851,8 @@ button {
 }
 
 .primary-button:disabled,
-.secondary-button:disabled {
+.secondary-button:disabled,
+.favorite-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -883,11 +886,17 @@ button {
   border-radius: 20px;
   padding: 18px;
   min-width: 0;
+  cursor: pointer;
 }
 
 .job-card.selected {
   border-color: rgba(28, 108, 75, 0.56);
   box-shadow: 0 12px 30px rgba(28, 108, 75, 0.12);
+}
+
+.job-card:focus-visible {
+  outline: 2px solid rgba(28, 108, 75, 0.42);
+  outline-offset: 3px;
 }
 
 .job-card-topline {
@@ -946,6 +955,47 @@ button {
   gap: 10px;
   flex: 0 1 auto;
   min-width: 0;
+}
+
+.favorite-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0;
+  color: #5f7268;
+  background: rgba(19, 38, 31, 0.06);
+}
+
+.favorite-button.active {
+  color: #c27a00;
+  background: rgba(255, 211, 92, 0.22);
+}
+
+.favorite-icon {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.favorite-button.active .favorite-icon {
+  fill: currentColor;
+}
+
+.card-favorite-button {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+}
+
+.detail-favorite-button {
+  padding: 10px 14px;
+  font-weight: 700;
 }
 
 .job-card-side-meta {
@@ -1188,6 +1238,14 @@ button {
   align-items: start;
 }
 
+.drawer-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .drawer-content {
   margin-top: 24px;
 }
@@ -1327,6 +1385,12 @@ button {
     height: 34px;
   }
 
+  .card-favorite-button {
+    width: 34px;
+    min-width: 34px;
+    height: 34px;
+  }
+
   .resume-meta-grid,
   .resume-profile-grid,
   .resume-stage-grid,
@@ -1448,6 +1512,15 @@ button {
   .drawer-header .icon-button {
     background: transparent;
     padding: 0;
+  }
+
+  .drawer-header-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .detail-favorite-button {
+    padding: 8px 12px;
   }
 
   .resume-meta-grid,

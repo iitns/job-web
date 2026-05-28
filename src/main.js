@@ -1,8 +1,10 @@
 const MOBILE_VIEWPORT_QUERY = window.matchMedia('(max-width: 980px)')
+const PERSISTED_ACTIVE_TAB = window.localStorage.getItem('job-web:active-tab') || 'recommend'
 
 const TAB_LABELS = {
   search: '목록',
   recommend: '추천',
+  favorites: '즐겨찾기',
   manage: '이력서 관리',
 }
 
@@ -80,7 +82,7 @@ const LOCATION_ABBREVIATIONS = {
 }
 
 function availableTabs(isMobile = MOBILE_VIEWPORT_QUERY.matches) {
-  return ['recommend', 'search', 'manage']
+  return ['recommend', 'search', 'favorites', 'manage']
 }
 
 function normalizeTab(tab, isMobile = MOBILE_VIEWPORT_QUERY.matches) {
@@ -91,7 +93,7 @@ function normalizeTab(tab, isMobile = MOBILE_VIEWPORT_QUERY.matches) {
 }
 
 const state = {
-  activeTab: normalizeTab('recommend'),
+  activeTab: normalizeTab(PERSISTED_ACTIVE_TAB),
   draftKeyword: '',
   searchKeyword: '',
   selectedCompanies: [],
@@ -108,6 +110,7 @@ const state = {
   loading: false,
   detailLoading: false,
   error: '',
+  favoriteError: '',
   searchReady: true,
   source: 'postgres',
   resume: null,
@@ -127,6 +130,7 @@ const state = {
   selectedResumeRecordLoading: false,
   selectedResumeRecordError: '',
   resumeActionId: null,
+  favoriteActionJobIds: [],
   isMobile: MOBILE_VIEWPORT_QUERY.matches,
   mobileMenuOpen: false,
 }
@@ -300,6 +304,46 @@ function renderMobileMetaLine(job) {
     .join('')
 }
 
+function isFavoriteActionPending(jobId) {
+  return state.favoriteActionJobIds.includes(jobId)
+}
+
+function favoriteAriaLabel(job) {
+  return job.is_favorited ? '즐겨찾기 해제' : '즐겨찾기 추가'
+}
+
+function renderFavoriteButton(job, { context = 'card' } = {}) {
+  const pending = isFavoriteActionPending(job.job_id)
+  const className = [
+    'favorite-button',
+    context === 'detail' ? 'detail-favorite-button' : 'card-favorite-button',
+    job.is_favorited ? 'active' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  return `
+    <button
+      class="${className}"
+      type="button"
+      data-favorite-job-id="${escapeHtml(job.job_id)}"
+      data-next-favorite="${job.is_favorited ? 'false' : 'true'}"
+      aria-label="${favoriteAriaLabel(job)}"
+      aria-pressed="${job.is_favorited ? 'true' : 'false'}"
+      ${pending ? 'disabled' : ''}
+    >
+      <svg class="favorite-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 3.75 14.62 9.06 20.48 9.91 16.24 14.05 17.24 19.89 12 17.13 6.76 19.89 7.76 14.05 3.52 9.91 9.38 9.06 12 3.75Z"></path>
+      </svg>
+      ${
+        context === 'detail'
+          ? `<span>${job.is_favorited ? '즐겨찾기됨' : '즐겨찾기'}</span>`
+          : ''
+      }
+    </button>
+  `
+}
+
 function renderJobCardHeader(job) {
   if (state.isMobile) {
     return `
@@ -312,15 +356,14 @@ function renderJobCardHeader(job) {
             <span class="job-title">${escapeHtml(job.title)}</span>
           </div>
         </div>
-        ${
-          job.recommendation_score
-            ? `
-              <div class="job-card-sidegroup mobile">
-                <span class="recommendation-badge">${escapeHtml(job.recommendation_score)}</span>
-              </div>
-            `
-            : ''
-        }
+        <div class="job-card-sidegroup mobile">
+          ${
+            job.recommendation_score
+              ? `<span class="recommendation-badge">${escapeHtml(job.recommendation_score)}</span>`
+              : ''
+          }
+          ${renderFavoriteButton(job)}
+        </div>
       </div>
     `
   }
@@ -345,6 +388,7 @@ function renderJobCardHeader(job) {
             ? `<span class="recommendation-badge">${escapeHtml(job.recommendation_score)}</span>`
             : ''
         }
+        ${renderFavoriteButton(job)}
       </div>
     </div>
   `
@@ -526,6 +570,50 @@ function preferredItems(job) {
   return splitTextLines(job.preferred_qualifications)
 }
 
+function favoriteEmptyMessage() {
+  const hasActiveFilters = Boolean(
+    state.searchKeyword.trim() ||
+    state.selectedCompanies.length ||
+    state.selectedSkills.length,
+  )
+
+  return hasActiveFilters
+    ? '조건에 맞는 즐겨찾기 공고가 없습니다.'
+    : '아직 즐겨찾기한 공고가 없습니다. 목록, 추천, 상세 화면의 별표로 저장해 보세요.'
+}
+
+function renderJobCard(job) {
+  return `
+    <article
+      class="job-card ${state.selectedJobId === job.job_id ? 'selected' : ''}"
+      role="button"
+      tabindex="0"
+      data-job-id="${escapeHtml(job.job_id)}"
+      aria-label="${escapeHtml(`${job.title} 상세 보기`)}"
+    >
+      ${renderJobCardHeader(job)}
+      <p class="job-summary">${escapeHtml(jobSummary(job))}</p>
+      ${
+        job.recommendation_reason
+          ? `<p class="job-reason">${escapeHtml(job.recommendation_reason)}</p>`
+          : ''
+      }
+      <div class="job-chip-row">
+        <span class="job-chip-label">Skills</span>
+        <div class="inline-chip-list">
+          ${renderInlineChips(job.matched_skills?.length ? job.matched_skills : job.skills, '스킬 없음')}
+        </div>
+      </div>
+      <div class="job-chip-row">
+        <span class="job-chip-label">Domains</span>
+        <div class="inline-chip-list">
+          ${renderInlineChips(job.matched_domains?.length ? job.matched_domains : job.domains, '도메인 없음')}
+        </div>
+      </div>
+    </article>
+  `
+}
+
 function buildQuery({ includeKeyword = false } = {}) {
   const params = new URLSearchParams()
   params.set('page', String(state.page))
@@ -574,6 +662,70 @@ function applyResumePayload(payload) {
   }
   if (Object.prototype.hasOwnProperty.call(payload, 'message')) {
     state.recommendationMessage = payload.message || ''
+  }
+}
+
+function setFavoriteActionPending(jobId, isPending) {
+  state.favoriteActionJobIds = isPending
+    ? [...new Set([...state.favoriteActionJobIds, jobId])]
+    : state.favoriteActionJobIds.filter((item) => item !== jobId)
+}
+
+function updateJobFavoriteState(jobId, isFavorited, favoritedAt) {
+  state.jobs = state.jobs.map((job) =>
+    job.job_id === jobId
+      ? {
+          ...job,
+          is_favorited: isFavorited,
+          favorited_at: favoritedAt,
+        }
+      : job,
+  )
+
+  if (state.selectedJob?.job_id === jobId) {
+    state.selectedJob = {
+      ...state.selectedJob,
+      is_favorited: isFavorited,
+      favorited_at: favoritedAt,
+    }
+  }
+}
+
+async function toggleFavorite(jobId, nextFavorite) {
+  state.favoriteError = ''
+  setFavoriteActionPending(jobId, true)
+  render()
+
+  try {
+    const payload = await requestJson(`/api/jobs/${encodeURIComponent(jobId)}/favorite`, {
+      method: nextFavorite ? 'PUT' : 'DELETE',
+    })
+
+    updateJobFavoriteState(jobId, payload.is_favorited === true, payload.favorited_at || null)
+
+    if (state.activeTab === 'favorites' && payload.is_favorited !== true) {
+      const jobCountBeforeRemoval = state.jobs.length
+      state.jobs = state.jobs.filter((job) => job.job_id !== jobId)
+      if (jobCountBeforeRemoval !== state.jobs.length) {
+        state.total = Math.max(0, state.total - 1)
+      }
+
+      if (state.selectedJobId === jobId) {
+        state.selectedJobId = null
+        state.selectedJob = null
+      }
+
+      if (!state.jobs.length && state.page > 1) {
+        state.page -= 1
+        await loadJobs()
+        return
+      }
+    }
+  } catch (error) {
+    state.favoriteError = error.message || '즐겨찾기 상태를 변경하지 못했습니다.'
+  } finally {
+    setFavoriteActionPending(jobId, false)
+    render()
   }
 }
 
@@ -727,6 +879,7 @@ async function loadJobs() {
 
   state.loading = true
   state.error = ''
+  state.favoriteError = ''
   render()
 
   try {
@@ -734,9 +887,11 @@ async function loadJobs() {
     const endpoint =
       state.activeTab === 'recommend'
         ? `/api/jobs/recommendations?${query}`
-        : state.searchKeyword.trim()
-          ? `/api/jobs/search?${query}`
-          : `/api/jobs?${query}`
+        : state.activeTab === 'favorites'
+          ? `/api/jobs/favorites?${query}`
+          : state.searchKeyword.trim()
+            ? `/api/jobs/search?${query}`
+            : `/api/jobs?${query}`
 
     const payload = await requestJson(endpoint)
     state.jobs = payload.jobs || []
@@ -915,38 +1070,12 @@ function renderJobs() {
   }
 
   if (state.jobs.length === 0) {
-    return '<div class="results-state">조건에 맞는 공고가 없습니다.</div>'
+    return `<div class="results-state">${escapeHtml(state.activeTab === 'favorites' ? favoriteEmptyMessage() : '조건에 맞는 공고가 없습니다.')}</div>`
   }
 
   return `
     <div class="job-list">
-      ${state.jobs
-        .map(
-          (job) => `
-            <button class="job-card ${state.selectedJobId === job.job_id ? 'selected' : ''}" type="button" data-job-id="${escapeHtml(job.job_id)}">
-              ${renderJobCardHeader(job)}
-              <p class="job-summary">${escapeHtml(jobSummary(job))}</p>
-              ${
-                job.recommendation_reason
-                  ? `<p class="job-reason">${escapeHtml(job.recommendation_reason)}</p>`
-                  : ''
-              }
-              <div class="job-chip-row">
-                <span class="job-chip-label">Skills</span>
-                <div class="inline-chip-list">
-                  ${renderInlineChips(job.matched_skills?.length ? job.matched_skills : job.skills, '스킬 없음')}
-                </div>
-              </div>
-              <div class="job-chip-row">
-                <span class="job-chip-label">Domains</span>
-                <div class="inline-chip-list">
-                  ${renderInlineChips(job.matched_domains?.length ? job.matched_domains : job.domains, '도메인 없음')}
-                </div>
-              </div>
-            </button>
-          `,
-        )
-        .join('')}
+      ${state.jobs.map((job) => renderJobCard(job)).join('')}
     </div>
   `
 }
@@ -1403,12 +1532,15 @@ function renderRecommendationPanel() {
 
 function renderResultsPanel() {
   const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize))
+  const totalLabel = state.activeTab === 'favorites' ? `즐겨찾기 ${state.total}건` : `총 ${state.total}건`
 
   return `
     <section class="panel results-panel">
       <div class="results-header">
-        <p class="results-total">총 ${state.total}건</p>
+        <p class="results-total">${totalLabel}</p>
       </div>
+
+      ${state.favoriteError ? `<div class="inline-message error">${escapeHtml(state.favoriteError)}</div>` : ''}
 
       ${
         state.error
@@ -1519,7 +1651,10 @@ function renderDrawer() {
             <p class="eyebrow">Job Detail</p>
             <h2>${escapeHtml(job.title)}</h2>
           </div>
-          <button class="icon-button" type="button" data-close-drawer>닫기</button>
+          <div class="drawer-header-actions">
+            ${renderFavoriteButton(job, { context: 'detail' })}
+            <button class="icon-button" type="button" data-close-drawer>닫기</button>
+          </div>
         </div>
 
         <div class="drawer-content">
@@ -1539,6 +1674,15 @@ function renderDrawer() {
             <div>
               <p class="detail-label">게시일</p>
               <p>${formatDate(job.posted_at)}</p>
+            </div>
+            <div>
+              <p class="detail-label">즐겨찾기</p>
+              <p>${job.is_favorited ? '저장됨' : '미저장'}</p>
+              ${
+                job.is_favorited && job.favorited_at
+                  ? `<span class="field-meta">${escapeHtml(formatDateTime(job.favorited_at))}</span>`
+                  : ''
+              }
             </div>
           </div>
 
@@ -1623,6 +1767,7 @@ function executeSearch() {
   state.page = 1
   state.selectedJobId = null
   state.selectedJob = null
+  state.favoriteError = ''
   state.mobileMenuOpen = false
   loadJobs()
 }
@@ -1636,6 +1781,7 @@ function resetSearch() {
   state.page = 1
   state.selectedJobId = null
   state.selectedJob = null
+  state.favoriteError = ''
   state.mobileMenuOpen = false
   loadJobs()
 }
@@ -1644,6 +1790,7 @@ function applyFilters() {
   state.page = 1
   state.selectedJobId = null
   state.selectedJob = null
+  state.favoriteError = ''
   loadJobs()
 }
 
@@ -1653,6 +1800,7 @@ async function openResumeInManage(resumeId) {
   state.selectedJobId = null
   state.selectedJob = null
   state.error = ''
+  state.favoriteError = ''
   state.mobileMenuOpen = false
   window.localStorage.setItem('job-web:active-tab', 'manage')
 
@@ -1678,6 +1826,7 @@ function switchTab(nextTab) {
   state.selectedJobId = null
   state.selectedJob = null
   state.error = ''
+  state.favoriteError = ''
   state.mobileMenuOpen = false
   window.localStorage.setItem('job-web:active-tab', normalizedTab)
 
@@ -1699,6 +1848,7 @@ function bindEvents() {
   const skillButtons = root.querySelectorAll('[data-skill]')
   const toggleSkillListButton = root.querySelector('[data-toggle-skill-list]')
   const jobButtons = root.querySelectorAll('[data-job-id]')
+  const favoriteButtons = root.querySelectorAll('[data-favorite-job-id]')
   const closeButtons = root.querySelectorAll('[data-close-drawer]')
   const resumeForm = root.querySelector('[data-resume-form]')
   const resumeRefreshButtons = root.querySelectorAll('[data-resume-refresh]')
@@ -1819,6 +1969,21 @@ function bindEvents() {
     })
   })
 
+  favoriteButtons.forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation()
+
+      const jobId = event.currentTarget.dataset.favoriteJobId
+      const nextFavorite = event.currentTarget.dataset.nextFavorite === 'true'
+      if (!jobId) {
+        return
+      }
+
+      state.mobileMenuOpen = false
+      toggleFavorite(jobId, nextFavorite)
+    })
+  })
+
   pageButtons.forEach((button) => {
     button.addEventListener('click', (event) => {
       const direction = event.target.dataset.page
@@ -1838,6 +2003,21 @@ function bindEvents() {
       if (!jobId) {
         return
       }
+      state.mobileMenuOpen = false
+      loadJobDetail(jobId)
+    })
+
+    button.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') {
+        return
+      }
+
+      event.preventDefault()
+      const jobId = event.currentTarget.dataset.jobId
+      if (!jobId) {
+        return
+      }
+
       state.mobileMenuOpen = false
       loadJobDetail(jobId)
     })

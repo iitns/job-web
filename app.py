@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 DIST_DIR = BASE_DIR / "dist"
+MIGRATIONS_DIR = BASE_DIR / "migrations"
 
 app = Flask(__name__, static_folder=str(DIST_DIR), static_url_path="")
 
@@ -47,7 +48,6 @@ AIRFLOW_DAG_ID = os.environ.get("AIRFLOW_RESUME_DAG_ID", "job_recommender_resume
 DEFAULT_PAGE_SIZE = 12
 MAX_PAGE_SIZE = 50
 ALLOWED_RESUME_EXTENSIONS = {".docx"}
-RESUME_SCHEMA_PATH = BASE_DIR / "migrations" / "001_create_job_web_resume_tables.sql"
 KNN_CANDIDATES = 200
 KNN_NUM_CANDIDATES = 500
 
@@ -77,6 +77,8 @@ RESUME_STATUS_LABELS = {
     "failed": "처리 실패",
 }
 
+RUNTIME_STATE_READY = False
+
 
 def get_page_args() -> tuple[int, int]:
     page = max(1, int(request.args.get("page", "1")))
@@ -104,11 +106,17 @@ def db_connect():
     return psycopg2.connect(**PG_CONFIG)
 
 
-def ensure_runtime_state() -> None:
+def ensure_runtime_state(*, force: bool = False) -> None:
+    global RUNTIME_STATE_READY
+    if RUNTIME_STATE_READY and not force:
+        return
+
     with db_connect() as conn:
         with conn.cursor() as cur:
-            cur.execute(RESUME_SCHEMA_PATH.read_text(encoding="utf-8"))
+            for migration_path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+                cur.execute(migration_path.read_text(encoding="utf-8"))
         conn.commit()
+    RUNTIME_STATE_READY = True
 
 
 def summarize_text(*parts: Any, limit: int = 220) -> str | None:
@@ -341,6 +349,11 @@ def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
         row.get("responsibilities"),
         row.get("raw_description"),
     )
+    favorited_at = serialize_datetime(row.get("favorited_at"))
+    is_favorited = row.get("is_favorited")
+    if is_favorited is None:
+        is_favorited = favorited_at is not None
+
     return {
         "job_id": row.get("job_id"),
         "company": row.get("company"),
@@ -370,6 +383,8 @@ def serialize_job(row: dict[str, Any]) -> dict[str, Any]:
         "last_seen_at": serialize_datetime(row.get("last_seen_at")),
         "is_active": row.get("is_active", True),
         "detail_extracted_at": serialize_datetime(row.get("detail_extracted_at")),
+        "is_favorited": bool(is_favorited),
+        "favorited_at": favorited_at,
     }
 
 
@@ -434,6 +449,72 @@ def serialize_resume_profile(row: dict[str, Any] | None, *, include_raw_text: bo
         profile["raw_text"] = raw_text or None
 
     return profile
+
+
+def fetch_favorite_lookup(conn, *, job_ids: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    normalized_job_ids = [
+        str(job_id or "").strip()
+        for job_id in (job_ids or [])
+        if str(job_id or "").strip()
+    ]
+
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        if job_ids is None:
+            cur.execute(
+                """
+                SELECT job_id, created_at AS favorited_at
+                FROM job_favorites
+                """
+            )
+        else:
+            if not normalized_job_ids:
+                return {}
+
+            cur.execute(
+                """
+                SELECT job_id, created_at AS favorited_at
+                FROM job_favorites
+                WHERE job_id = ANY(%s)
+                """,
+                (normalized_job_ids,),
+            )
+        rows = cur.fetchall()
+
+    return {
+        str(row["job_id"]): dict(row)
+        for row in rows
+        if row.get("job_id")
+    }
+
+
+def enrich_jobs_with_favorites(
+    jobs: list[dict[str, Any]],
+    *,
+    conn=None,
+) -> list[dict[str, Any]]:
+    if not jobs:
+        return jobs
+
+    job_ids = [str(job.get("job_id") or "").strip() for job in jobs if job.get("job_id")]
+    if not job_ids:
+        for job in jobs:
+            job["is_favorited"] = False
+            job["favorited_at"] = None
+        return jobs
+
+    if conn is None:
+        with db_connect() as favorite_conn:
+            favorite_lookup = fetch_favorite_lookup(favorite_conn, job_ids=job_ids)
+    else:
+        favorite_lookup = fetch_favorite_lookup(conn, job_ids=job_ids)
+
+    for job in jobs:
+        job_id = str(job.get("job_id") or "").strip()
+        favorite = favorite_lookup.get(job_id)
+        job["is_favorited"] = favorite is not None
+        job["favorited_at"] = serialize_datetime(favorite.get("favorited_at")) if favorite else None
+
+    return jobs
 
 
 def fetch_filter_options_from_postgres(conn, *, allowed_job_ids: list[str] | None = None) -> tuple[list[str], list[str]]:
@@ -623,6 +704,7 @@ def fetch_jobs_from_postgres(*, page: int, page_size: int, companies: list[str],
                 [*params, offset, page_size],
             )
             jobs = [serialize_job(dict(row)) for row in cur.fetchall()]
+            jobs = enrich_jobs_with_favorites(jobs, conn=conn)
 
     filter_options = fetch_filter_options_from_elasticsearch()
 
@@ -728,6 +810,7 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
     hits = payload.get("hits", {})
     total = hits.get("total", {}).get("value", 0)
     jobs = [serialize_job(hit.get("_source", {})) for hit in hits.get("hits", [])]
+    jobs = enrich_jobs_with_favorites(jobs)
 
     filter_options = fetch_filter_options_from_elasticsearch(keyword=keyword)
 
@@ -863,6 +946,192 @@ def fetch_recommendation_job_ids(conn, *, resume_id: int) -> list[str]:
             (resume_id,),
         )
         return [row[0] for row in cur.fetchall() if row[0]]
+
+
+def fetch_favorite_filter_options_from_postgres(conn) -> tuple[list[str], list[str]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT j.company
+            FROM job_favorites f
+            JOIN jobs j USING (job_id)
+            WHERE j.company IS NOT NULL AND BTRIM(j.company) <> ''
+            ORDER BY j.company ASC
+            """
+        )
+        companies = [row[0] for row in cur.fetchall() if row[0]]
+
+        cur.execute(
+            """
+            SELECT DISTINCT skill
+            FROM (
+                SELECT UNNEST(COALESCE(j.skills, ARRAY[]::TEXT[])) AS skill
+                FROM job_favorites f
+                JOIN jobs j USING (job_id)
+            ) skill_values
+            WHERE skill IS NOT NULL AND BTRIM(skill) <> ''
+            ORDER BY skill ASC
+            """
+        )
+        skills = [row[0] for row in cur.fetchall() if row[0]]
+
+    return companies, skills
+
+
+def fetch_favorite_jobs_from_postgres(
+    *,
+    page: int,
+    page_size: int,
+    companies: list[str],
+    skills: list[str],
+    keyword: str,
+) -> dict[str, Any]:
+    filters = ["TRUE"]
+    params: list[Any] = []
+
+    if companies:
+        filters.append("j.company = ANY(%s)")
+        params.append(companies)
+    if skills:
+        filters.append("COALESCE(j.skills, ARRAY[]::TEXT[]) && %s::TEXT[]")
+        params.append(skills)
+    if keyword:
+        like_keyword = f"%{keyword}%"
+        filters.append(
+            """
+            (
+                j.company ILIKE %s
+                OR j.title ILIKE %s
+                OR COALESCE(j.team, '') ILIKE %s
+                OR COALESCE(j.level_guess, '') ILIKE %s
+                OR COALESCE(j.team_description, '') ILIKE %s
+                OR COALESCE(j.responsibilities, '') ILIKE %s
+                OR COALESCE(j.minimum_qualifications, '') ILIKE %s
+                OR COALESCE(j.preferred_qualifications, '') ILIKE %s
+                OR COALESCE(array_to_string(j.skills, ' '), '') ILIKE %s
+                OR COALESCE(array_to_string(j.domains, ' '), '') ILIKE %s
+            )
+            """
+        )
+        params.extend([like_keyword] * 10)
+
+    where_clause = " AND ".join(filters)
+    offset = (page - 1) * page_size
+
+    with db_connect() as conn:
+        favorite_companies, favorite_skills = fetch_favorite_filter_options_from_postgres(conn)
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM job_favorites f
+                JOIN jobs j USING (job_id)
+                WHERE {where_clause}
+                """,
+                params,
+            )
+            total = cur.fetchone()["total"]
+
+            cur.execute(
+                f"""
+                SELECT
+                    j.job_id,
+                    j.company,
+                    j.title,
+                    j.locations,
+                    j.level_guess,
+                    j.team,
+                    j.raw_description,
+                    j.team_description,
+                    j.responsibilities,
+                    j.minimum_qualifications,
+                    j.preferred_qualifications,
+                    j.skills,
+                    j.domains,
+                    j.url,
+                    j.posted_at,
+                    j.first_seen_at,
+                    j.last_seen_at,
+                    j.is_active,
+                    j.detail_extracted_at,
+                    j.summary,
+                    TRUE AS is_favorited,
+                    f.created_at AS favorited_at
+                FROM job_favorites f
+                JOIN jobs j USING (job_id)
+                WHERE {where_clause}
+                ORDER BY f.created_at DESC, j.posted_at DESC NULLS LAST, j.last_seen_at DESC, j.job_id ASC
+                OFFSET %s
+                LIMIT %s
+                """,
+                [*params, offset, page_size],
+            )
+            jobs = [serialize_job(dict(row)) for row in cur.fetchall()]
+
+    return {
+        "jobs": jobs,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "companies": favorite_companies,
+        "skills": favorite_skills,
+        "source": "favorites",
+        "search_ready": True,
+    }
+
+
+def job_exists(conn, *, job_id: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM jobs WHERE job_id = %s", (job_id,))
+        return cur.fetchone() is not None
+
+
+def fetch_job_favorite(conn, *, job_id: str) -> dict[str, Any] | None:
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT job_id, created_at AS favorited_at
+            FROM job_favorites
+            WHERE job_id = %s
+            """,
+            (job_id,),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def create_job_favorite(*, job_id: str) -> dict[str, Any] | None:
+    with db_connect() as conn:
+        if not job_exists(conn, job_id=job_id):
+            return None
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO job_favorites (job_id)
+                VALUES (%s)
+                ON CONFLICT (job_id) DO NOTHING
+                """,
+                (job_id,),
+            )
+        favorite = fetch_job_favorite(conn, job_id=job_id)
+        conn.commit()
+
+    return favorite
+
+
+def delete_job_favorite(*, job_id: str) -> bool | None:
+    with db_connect() as conn:
+        exists = job_exists(conn, job_id=job_id)
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM job_favorites WHERE job_id = %s", (job_id,))
+            deleted = cur.rowcount > 0
+        conn.commit()
+
+    if not exists and not deleted:
+        return None
+    return deleted
 
 
 def knn_search_recommendation_candidates(*, resume_embedding: list[float]) -> tuple[list[dict[str, Any]], bool]:
@@ -1160,6 +1429,7 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
                     serialize_job(job)
                     for job in filtered_jobs[offset : offset + page_size]
                 ]
+                jobs = enrich_jobs_with_favorites(jobs, conn=conn)
 
                 return {
                     "jobs": jobs,
@@ -1240,6 +1510,7 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
                 [*params, offset, page_size],
             )
             jobs = [serialize_job(dict(row)) for row in cur.fetchall()]
+            jobs = enrich_jobs_with_favorites(jobs, conn=conn)
 
     return {
         "jobs": jobs,
@@ -1457,6 +1728,9 @@ def trigger_resume_dag(resume_id: int) -> dict[str, Any]:
 def healthz():
     try:
         ensure_runtime_state()
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
         return jsonify({"ok": True})
     except Exception as exc:
         logger.exception("Health check failed")
@@ -1465,6 +1739,7 @@ def healthz():
 
 @app.get("/api/jobs")
 def list_jobs():
+    ensure_runtime_state()
     page, page_size = get_page_args()
     companies = get_companies_arg()
     skills = get_skills_arg()
@@ -1478,6 +1753,7 @@ def list_jobs():
 
 @app.get("/api/jobs/search")
 def search_jobs():
+    ensure_runtime_state()
     keyword = request.args.get("q", "").strip()
     page, page_size = get_page_args()
     companies = get_companies_arg()
@@ -1503,6 +1779,7 @@ def search_jobs():
 
 @app.get("/api/jobs/recommendations")
 def recommend_jobs():
+    ensure_runtime_state()
     page, page_size = get_page_args()
     companies = get_companies_arg()
     skills = get_skills_arg()
@@ -1523,35 +1800,63 @@ def recommend_jobs():
         return jsonify({"error": "failed_to_recommend_jobs", "message": str(exc)}), 500
 
 
+@app.get("/api/jobs/favorites")
+def list_favorite_jobs():
+    ensure_runtime_state()
+    page, page_size = get_page_args()
+    companies = get_companies_arg()
+    skills = get_skills_arg()
+    keyword = request.args.get("q", "").strip()
+
+    try:
+        return jsonify(
+            fetch_favorite_jobs_from_postgres(
+                page=page,
+                page_size=page_size,
+                companies=companies,
+                skills=skills,
+                keyword=keyword,
+            )
+        )
+    except Exception as exc:
+        logger.exception("Failed to load favorite jobs")
+        return jsonify({"error": "failed_to_load_favorite_jobs", "message": str(exc)}), 500
+
+
 @app.get("/api/jobs/<job_id>")
 def job_detail(job_id: str):
+    ensure_runtime_state()
     try:
         with db_connect() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
                     SELECT
-                        job_id,
-                        company,
-                        title,
-                        locations,
-                        level_guess,
-                        team,
-                        raw_description,
-                        team_description,
-                        responsibilities,
-                        minimum_qualifications,
-                        preferred_qualifications,
-                        skills,
-                        domains,
-                        url,
-                        posted_at,
-                        first_seen_at,
-                        last_seen_at,
-                        is_active,
-                        detail_extracted_at
-                    FROM jobs
-                    WHERE job_id = %s
+                        j.job_id,
+                        j.company,
+                        j.title,
+                        j.locations,
+                        j.level_guess,
+                        j.team,
+                        j.raw_description,
+                        j.team_description,
+                        j.responsibilities,
+                        j.minimum_qualifications,
+                        j.preferred_qualifications,
+                        j.skills,
+                        j.domains,
+                        j.url,
+                        j.posted_at,
+                        j.first_seen_at,
+                        j.last_seen_at,
+                        j.is_active,
+                        j.detail_extracted_at,
+                        (f.job_id IS NOT NULL) AS is_favorited,
+                        f.created_at AS favorited_at
+                    FROM jobs j
+                    LEFT JOIN job_favorites f
+                        ON f.job_id = j.job_id
+                    WHERE j.job_id = %s
                     """,
                     (job_id,),
                 )
@@ -1564,6 +1869,49 @@ def job_detail(job_id: str):
     except Exception as exc:
         logger.exception("Failed to load job detail")
         return jsonify({"error": "failed_to_load_job_detail", "message": str(exc)}), 500
+
+
+@app.put("/api/jobs/<job_id>/favorite")
+def favorite_job(job_id: str):
+    ensure_runtime_state()
+
+    try:
+        favorite = create_job_favorite(job_id=job_id)
+        if not favorite:
+            return jsonify({"error": "job_not_found"}), 404
+
+        return jsonify(
+            {
+                "job_id": job_id,
+                "is_favorited": True,
+                "favorited_at": serialize_datetime(favorite.get("favorited_at")),
+            }
+        )
+    except Exception as exc:
+        logger.exception("Failed to favorite job")
+        return jsonify({"error": "failed_to_favorite_job", "message": str(exc)}), 500
+
+
+@app.delete("/api/jobs/<job_id>/favorite")
+def unfavorite_job(job_id: str):
+    ensure_runtime_state()
+
+    try:
+        deleted = delete_job_favorite(job_id=job_id)
+        if deleted is None:
+            return jsonify({"error": "job_not_found"}), 404
+
+        return jsonify(
+            {
+                "job_id": job_id,
+                "is_favorited": False,
+                "favorited_at": None,
+                "deleted": deleted,
+            }
+        )
+    except Exception as exc:
+        logger.exception("Failed to unfavorite job")
+        return jsonify({"error": "failed_to_unfavorite_job", "message": str(exc)}), 500
 
 
 @app.post("/api/resumes")
