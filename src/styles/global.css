@@ -148,16 +148,16 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 42px;
-  height: 42px;
+  width: 54px;
+  height: 54px;
   padding: 0;
   color: var(--primary);
   text-decoration: none;
 }
 
 .home-icon {
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
@@ -221,6 +221,10 @@ button {
 .recommend-copy {
   margin: 12px 0 0;
   color: var(--text-subtle);
+}
+
+.resume-skill-preview {
+  margin-top: 14px;
 }
 
 .resume-hero {
@@ -719,6 +723,14 @@ button {
   font-weight: 700;
 }
 
+.skill-filter-list {
+  margin-top: 4px;
+}
+
+.skill-filter-chip {
+  text-align: left;
+}
+
 .checkbox-item {
   display: flex;
   align-items: center;
@@ -962,6 +974,27 @@ button {
   min-height: 300px;
 }
 
+.results-state-card {
+  max-width: 420px;
+  display: grid;
+  gap: 16px;
+  padding: 22px 24px;
+  border-radius: 24px;
+  border: 1px solid rgba(19, 38, 31, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(247, 249, 244, 0.96));
+  text-align: center;
+}
+
+.results-state-card p {
+  margin: 0;
+  color: var(--text-subtle);
+}
+
+.centered-actions {
+  justify-content: center;
+  margin-top: 0;
+}
+
 .pagination {
   display: flex;
   justify-content: center;
@@ -1146,6 +1179,16 @@ button {
   .search-panel {
     position: static;
     padding: 0;
+  }
+
+  .home-link {
+    width: 42px;
+    height: 42px;
+  }
+
+  .home-icon {
+    width: 18px;
+    height: 18px;
   }
 
   .results-panel {

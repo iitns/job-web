@@ -80,22 +80,24 @@ const LOCATION_ABBREVIATIONS = {
 }
 
 function availableTabs(isMobile = MOBILE_VIEWPORT_QUERY.matches) {
-  return ['search', 'recommend', 'manage']
+  return ['recommend', 'search', 'manage']
 }
 
 function normalizeTab(tab, isMobile = MOBILE_VIEWPORT_QUERY.matches) {
   if (tab === 'update' || tab === 'extract') {
     return 'manage'
   }
-  return availableTabs(isMobile).includes(tab) ? tab : 'search'
+  return availableTabs(isMobile).includes(tab) ? tab : 'recommend'
 }
 
 const state = {
-  activeTab: normalizeTab(window.localStorage.getItem('job-web:active-tab') || 'search'),
+  activeTab: normalizeTab('recommend'),
   draftKeyword: '',
   searchKeyword: '',
   selectedCompanies: [],
+  selectedSkills: [],
   companies: [],
+  skills: [],
   jobs: [],
   total: 0,
   page: 1,
@@ -358,6 +360,34 @@ function normalizeList(value) {
   return Array.isArray(value) ? value.filter(Boolean) : []
 }
 
+function uniqueTextList(items) {
+  const values = []
+
+  items.forEach((item) => {
+    const value = String(item || '').trim()
+    if (value && !values.includes(value)) {
+      values.push(value)
+    }
+  })
+
+  return values
+}
+
+function sortOptionsWithSelected(options, selected) {
+  const selectedSet = new Set(selected)
+
+  return [...uniqueTextList(options)].sort((left, right) => {
+    const leftSelected = selectedSet.has(left)
+    const rightSelected = selectedSet.has(right)
+
+    if (leftSelected !== rightSelected) {
+      return leftSelected ? -1 : 1
+    }
+
+    return left.localeCompare(right, 'en', { sensitivity: 'base' })
+  })
+}
+
 function formatYears(value) {
   if (value === null || value === undefined || value === '') {
     return '미정'
@@ -469,6 +499,9 @@ function buildQuery({ includeKeyword = false } = {}) {
 
   state.selectedCompanies.forEach((company) => {
     params.append('company', company)
+  })
+  state.selectedSkills.forEach((skill) => {
+    params.append('skill', skill)
   })
 
   if (includeKeyword && state.searchKeyword.trim()) {
@@ -663,7 +696,7 @@ async function loadJobs() {
   render()
 
   try {
-    const query = buildQuery({ includeKeyword: state.activeTab === 'search' })
+    const query = buildQuery({ includeKeyword: state.activeTab !== 'manage' })
     const endpoint =
       state.activeTab === 'recommend'
         ? `/api/jobs/recommendations?${query}`
@@ -677,6 +710,7 @@ async function loadJobs() {
     state.page = payload.page || 1
     state.pageSize = payload.page_size || state.pageSize
     state.companies = payload.companies || []
+    state.skills = payload.skills || []
     state.source = payload.source || 'postgres'
     state.searchReady = payload.search_ready !== false
 
@@ -750,11 +784,13 @@ async function uploadResume(file) {
 }
 
 function renderCompanyOptions() {
-  if (state.companies.length === 0) {
+  const companies = uniqueTextList([...state.selectedCompanies, ...state.companies])
+
+  if (companies.length === 0) {
     return '<p class="empty-hint">표시할 회사가 아직 없습니다.</p>'
   }
 
-  return state.companies
+  return companies
     .map(
       (company) => `
         <label class="checkbox-item">
@@ -770,17 +806,64 @@ function renderCompanyOptions() {
     .join('')
 }
 
+function renderSkillOptions() {
+  const skills = sortOptionsWithSelected([...state.selectedSkills, ...state.skills], state.selectedSkills)
+
+  if (skills.length === 0) {
+    return '<p class="empty-hint">표시할 스킬이 아직 없습니다.</p>'
+  }
+
+  return `
+    <div class="toggle-row skill-filter-list">
+      ${skills
+        .map(
+          (skill) => `
+            <button
+              class="toggle-chip skill-filter-chip ${state.selectedSkills.includes(skill) ? 'active' : ''}"
+              type="button"
+              data-skill="${escapeHtml(skill)}"
+            >
+              ${escapeHtml(skill)}
+            </button>
+          `,
+        )
+        .join('')}
+    </div>
+  `
+}
+
+function renderRecommendationState(message, { includeManageButton = false } = {}) {
+  return `
+    <div class="results-state">
+      <div class="results-state-card">
+        <p>${escapeHtml(message)}</p>
+        ${
+          includeManageButton
+            ? `
+              <div class="panel-actions centered-actions">
+                <button class="primary-button" type="button" data-tab-jump="manage">이력서 관리로 이동</button>
+              </div>
+            `
+            : ''
+        }
+      </div>
+    </div>
+  `
+}
+
 function renderJobs() {
   if (state.loading) {
     return '<div class="results-state">공고를 불러오는 중입니다.</div>'
   }
 
   if (state.activeTab === 'recommend' && !state.resume) {
-    return `<div class="results-state">${state.isMobile ? '추천을 사용하려면 활성 이력서를 업로드하거나 선택해 주세요.' : '추천을 사용하려면 활성 이력서를 업로드하거나 선택해 주세요.'}</div>`
+    return renderRecommendationState('활성 이력서가 없습니다. 이력서 관리에서 이력서를 업로드하거나 활성화해 주세요.', {
+      includeManageButton: true,
+    })
   }
 
   if (state.activeTab === 'recommend' && !state.recommendationReady) {
-    return `<div class="results-state">${escapeHtml(state.recommendationMessage || '이력서 추천을 준비 중입니다.')}</div>`
+    return renderRecommendationState(state.recommendationMessage || '이력서 추천을 준비 중입니다.')
   }
 
   if (state.jobs.length === 0) {
@@ -1155,7 +1238,7 @@ function renderNavigation() {
       <nav class="top-nav panel mobile-nav">
         <div class="nav-mobile-copy">
           ${renderHomeLink()}
-          <span class="nav-current-tab">${TAB_LABELS[state.activeTab] || TAB_LABELS.search}</span>
+          <span class="nav-current-tab">${TAB_LABELS[state.activeTab] || TAB_LABELS.recommend}</span>
         </div>
         <button class="icon-button nav-menu-button" type="button" aria-label="메뉴 열기" data-open-mobile-menu>
           <span class="nav-menu-icon" aria-hidden="true">
@@ -1187,6 +1270,8 @@ function renderNavigation() {
 }
 
 function renderSearchControls() {
+  const buttonLabel = state.activeTab === 'recommend' ? '추천 검색' : '검색'
+
   return `
     <div class="control-stack">
       <div class="search-control-group">
@@ -1207,9 +1292,22 @@ function renderSearchControls() {
         </div>
       </div>
 
+      <div class="field">
+        <div class="field-row">
+          <span class="field-label">Skill</span>
+          <span class="field-meta">${uniqueTextList([...state.selectedSkills, ...state.skills]).length}개</span>
+        </div>
+        ${renderSkillOptions()}
+      </div>
+
       <div class="panel-actions">
-        <button class="primary-button" type="button" data-search>검색</button>
+        <button class="primary-button" type="button" data-search>${buttonLabel}</button>
         <button class="secondary-button" type="button" data-reset>초기화</button>
+        ${
+          state.activeTab === 'recommend' && !state.isMobile
+            ? '<button class="secondary-button" type="button" data-tab-jump="manage">이력서 관리</button>'
+            : ''
+        }
       </div>
     </div>
   `
@@ -1258,21 +1356,16 @@ function renderRecommendationControls({ mobile = false } = {}) {
           <span class="tag-chip">${escapeHtml(resumeStatusLabel(resume))}</span>
           <span class="tag-chip">${escapeHtml(recommendationStatusLabel(resume))}</span>
         </div>
-      </section>
-
-      ${
-        profileSkills.length
-          ? `
-            <section class="field">
-              <div class="field-row">
-                <span class="field-label">핵심 Skills</span>
-                <span class="field-meta">${profileSkills.length}개</span>
+        ${
+          profileSkills.length
+            ? `
+              <div class="tag-list compact-tag-list resume-skill-preview">
+                ${profileSkills.map((skill) => `<span class="tag-chip">${escapeHtml(skill)}</span>`).join('')}
               </div>
-              ${renderTagList(profileSkills)}
-            </section>
-          `
-          : ''
-      }
+            `
+            : ''
+        }
+      </section>
 
       ${
         state.recommendationMessage
@@ -1280,20 +1373,7 @@ function renderRecommendationControls({ mobile = false } = {}) {
           : ''
       }
 
-      <div class="field">
-        <div class="field-row">
-          <span class="field-label">회사</span>
-          <span class="field-meta">${state.companies.length}개</span>
-        </div>
-        <div class="checkbox-list">
-          ${renderCompanyOptions()}
-        </div>
-      </div>
-
-      <div class="panel-actions">
-        <button class="primary-button" type="button" data-recommend-refresh>추천 새로고침</button>
-        ${mobile ? '' : '<button class="secondary-button" type="button" data-tab-jump="manage">이력서 관리</button>'}
-      </div>
+      ${renderSearchControls({ mobile })}
     </div>
   `
 }
@@ -1318,7 +1398,7 @@ function renderResultsPanel() {
       ${
         state.error
           ? `<div class="results-state">${escapeHtml(state.error)}</div>`
-          : state.activeTab === 'search' && !state.searchReady
+          : (state.activeTab === 'search' || (state.activeTab === 'recommend' && state.searchKeyword.trim())) && !state.searchReady
             ? '<div class="results-state">검색 인덱스가 아직 준비되지 않아 빈 결과를 표시하고 있습니다.</div>'
             : renderJobs()
       }
@@ -1344,7 +1424,7 @@ function renderMobileMenu() {
         <div class="mobile-menu-header">
           <div class="nav-mobile-copy">
             ${renderHomeLink()}
-            <span class="nav-current-tab">${TAB_LABELS[state.activeTab] || TAB_LABELS.search}</span>
+            <span class="nav-current-tab">${TAB_LABELS[state.activeTab] || TAB_LABELS.recommend}</span>
           </div>
           <button class="icon-button" type="button" data-close-mobile-menu>닫기</button>
         </div>
@@ -1536,6 +1616,7 @@ function resetSearch() {
   state.draftKeyword = ''
   state.searchKeyword = ''
   state.selectedCompanies = []
+  state.selectedSkills = []
   state.page = 1
   state.selectedJobId = null
   state.selectedJob = null
@@ -1573,9 +1654,9 @@ function bindEvents() {
   const keywordInput = root.querySelector('.text-input')
   const searchButton = root.querySelector('[data-search]')
   const resetButton = root.querySelector('[data-reset]')
-  const refreshButton = root.querySelector('[data-recommend-refresh]')
   const pageButtons = root.querySelectorAll('[data-page]')
   const companyCheckboxes = root.querySelectorAll('input[data-company]')
+  const skillButtons = root.querySelectorAll('[data-skill]')
   const jobButtons = root.querySelectorAll('[data-job-id]')
   const closeButtons = root.querySelectorAll('[data-close-drawer]')
   const resumeForm = root.querySelector('[data-resume-form]')
@@ -1599,11 +1680,6 @@ function bindEvents() {
 
   searchButton?.addEventListener('click', executeSearch)
   resetButton?.addEventListener('click', resetSearch)
-  refreshButton?.addEventListener('click', () => {
-    state.page = 1
-    state.mobileMenuOpen = false
-    loadJobs()
-  })
 
   resumeRefreshButtons.forEach((button) => {
     button.addEventListener('click', async () => {
@@ -1612,6 +1688,23 @@ function bindEvents() {
       if (state.activeTab === 'manage') {
         await loadResumeList({ selectResumeId: state.selectedResumeRecordId })
       }
+    })
+  })
+
+  skillButtons.forEach((button) => {
+    button.addEventListener('click', (event) => {
+      const skill = event.currentTarget.dataset.skill
+      if (!skill) {
+        return
+      }
+
+      if (state.selectedSkills.includes(skill)) {
+        state.selectedSkills = state.selectedSkills.filter((item) => item !== skill)
+      } else {
+        state.selectedSkills = [...state.selectedSkills, skill]
+      }
+
+      render()
     })
   })
 

@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS resumes (
     status_updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     raw_text            TEXT,
     skills              TEXT[],
+    domains             TEXT[],
     summary             TEXT,
+    parsed_profile      JSONB,
     content_embedding   REAL[],
     uploaded_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     is_active           BOOLEAN NOT NULL DEFAULT TRUE
@@ -69,7 +71,9 @@ ALTER TABLE resumes ALTER COLUMN status_updated_at SET NOT NULL;
 
 ALTER TABLE resumes ADD COLUMN IF NOT EXISTS raw_text TEXT;
 ALTER TABLE resumes ADD COLUMN IF NOT EXISTS skills TEXT[];
+ALTER TABLE resumes ADD COLUMN IF NOT EXISTS domains TEXT[];
 ALTER TABLE resumes ADD COLUMN IF NOT EXISTS summary TEXT;
+ALTER TABLE resumes ADD COLUMN IF NOT EXISTS parsed_profile JSONB;
 ALTER TABLE resumes ADD COLUMN IF NOT EXISTS content_embedding REAL[];
 
 ALTER TABLE resumes ADD COLUMN IF NOT EXISTS is_active BOOLEAN;
