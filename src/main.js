@@ -388,6 +388,39 @@ function sortOptionsWithSelected(options, selected) {
   })
 }
 
+function resumeSuggestedSkills() {
+  return uniqueTextList(normalizeList(state.resumeProfile?.skills))
+}
+
+function sortSkillOptions(options) {
+  const selectedSet = new Set(state.selectedSkills)
+  const resumeSkillSet = new Set(state.activeTab === 'recommend' ? resumeSuggestedSkills() : [])
+
+  return [...uniqueTextList(options)].sort((left, right) => {
+    const leftSelected = selectedSet.has(left)
+    const rightSelected = selectedSet.has(right)
+    const leftResumeSkill = resumeSkillSet.has(left)
+    const rightResumeSkill = resumeSkillSet.has(right)
+
+    if (state.activeTab === 'recommend') {
+      const leftPriority = leftResumeSkill ? (leftSelected ? 0 : 1) : leftSelected ? 2 : 3
+      const rightPriority = rightResumeSkill ? (rightSelected ? 0 : 1) : rightSelected ? 2 : 3
+
+      if (leftPriority !== rightPriority) {
+        return leftPriority - rightPriority
+      }
+    } else if (leftSelected !== rightSelected) {
+      return leftSelected ? -1 : 1
+    }
+
+    if (state.activeTab !== 'recommend' && leftResumeSkill !== rightResumeSkill) {
+      return leftResumeSkill ? -1 : 1
+    }
+
+    return left.localeCompare(right, 'en', { sensitivity: 'base' })
+  })
+}
+
 function formatYears(value) {
   if (value === null || value === undefined || value === '') {
     return '미정'
@@ -807,7 +840,8 @@ function renderCompanyOptions() {
 }
 
 function renderSkillOptions() {
-  const skills = sortOptionsWithSelected([...state.selectedSkills, ...state.skills], state.selectedSkills)
+  const skills = sortSkillOptions([...state.selectedSkills, ...state.skills])
+  const resumeSkillSet = new Set(state.activeTab === 'recommend' ? resumeSuggestedSkills() : [])
 
   if (skills.length === 0) {
     return '<p class="empty-hint">표시할 스킬이 아직 없습니다.</p>'
@@ -819,7 +853,7 @@ function renderSkillOptions() {
         .map(
           (skill) => `
             <button
-              class="toggle-chip skill-filter-chip ${state.selectedSkills.includes(skill) ? 'active' : ''}"
+              class="toggle-chip skill-filter-chip ${resumeSkillSet.has(skill) ? 'resume-suggested' : ''} ${state.selectedSkills.includes(skill) ? 'active' : ''}"
               type="button"
               data-skill="${escapeHtml(skill)}"
             >
@@ -1322,10 +1356,7 @@ function renderSearchPanel() {
 }
 
 function renderRecommendationControls({ mobile = false } = {}) {
-  const profile = state.resumeProfile
   const resume = state.resume
-  const profileSkills = normalizeList(profile?.skills)
-  const summary = profile?.summary || '업로드된 최신 이력서를 기준으로 추천을 생성합니다.'
 
   if (!resume) {
     return `
@@ -1350,21 +1381,13 @@ function renderRecommendationControls({ mobile = false } = {}) {
     <div class="control-stack">
       <section class="recommend-summary">
         <p class="detail-label">최근 이력서</p>
-        <h3>${escapeHtml(resumeFilename(resume))}</h3>
-        <p class="recommend-copy">${escapeHtml(summary)}</p>
-        <div class="tag-list">
-          <span class="tag-chip">${escapeHtml(resumeStatusLabel(resume))}</span>
-          <span class="tag-chip">${escapeHtml(recommendationStatusLabel(resume))}</span>
-        </div>
-        ${
-          profileSkills.length
-            ? `
-              <div class="tag-list compact-tag-list resume-skill-preview">
-                ${profileSkills.map((skill) => `<span class="tag-chip">${escapeHtml(skill)}</span>`).join('')}
-              </div>
-            `
-            : ''
-        }
+        <button
+          class="resume-link-button"
+          type="button"
+          data-open-resume-manage="${escapeHtml(resume.id)}"
+        >
+          ${escapeHtml(resumeFilename(resume))}
+        </button>
       </section>
 
       ${
@@ -1624,6 +1647,24 @@ function resetSearch() {
   loadJobs()
 }
 
+async function openResumeInManage(resumeId) {
+  state.activeTab = 'manage'
+  state.page = 1
+  state.selectedJobId = null
+  state.selectedJob = null
+  state.error = ''
+  state.mobileMenuOpen = false
+  window.localStorage.setItem('job-web:active-tab', 'manage')
+
+  render()
+
+  await loadLatestResume()
+  await loadResumeList({
+    selectResumeId: resumeId || null,
+    preserveSelection: false,
+  })
+}
+
 function switchTab(nextTab) {
   const normalizedTab = normalizeTab(nextTab, state.isMobile)
   if (!normalizedTab || normalizedTab === state.activeTab) {
@@ -1663,6 +1704,7 @@ function bindEvents() {
   const resumeRefreshButtons = root.querySelectorAll('[data-resume-refresh]')
   const resumeSelectButtons = root.querySelectorAll('[data-resume-select]')
   const resumeActiveButtons = root.querySelectorAll('[data-resume-active]')
+  const openResumeManageButtons = root.querySelectorAll('[data-open-resume-manage]')
   const tabButtons = root.querySelectorAll('[data-tab]')
   const tabJumpButtons = root.querySelectorAll('[data-tab-jump]')
   const openMobileMenuButton = root.querySelector('[data-open-mobile-menu]')
@@ -1733,6 +1775,14 @@ function bindEvents() {
       }
       state.mobileMenuOpen = false
       updateResumeActive(resumeId, nextActive)
+    })
+  })
+
+  openResumeManageButtons.forEach((button) => {
+    button.addEventListener('click', (event) => {
+      const resumeId = Number(event.currentTarget.dataset.openResumeManage)
+      state.mobileMenuOpen = false
+      openResumeInManage(resumeId)
     })
   })
 

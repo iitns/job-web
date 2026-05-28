@@ -227,6 +227,24 @@ button {
   margin-top: 14px;
 }
 
+.resume-link-button {
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: 0.84rem;
+  font-weight: 600;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 0.14em;
+}
+
+.resume-link-button:hover {
+  color: var(--primary);
+  transform: none;
+}
+
 .resume-hero {
   display: flex;
   justify-content: space-between;
@@ -729,6 +747,19 @@ button {
 
 .skill-filter-chip {
   text-align: left;
+}
+
+.skill-filter-chip.resume-suggested {
+  background: rgba(216, 244, 107, 0.55);
+  border-color: rgba(28, 108, 75, 0.22);
+  color: #244739;
+}
+
+.skill-filter-chip.active {
+  background: rgba(96, 165, 250, 0.2);
+  border-color: rgba(37, 99, 235, 0.34);
+  color: #1d4ed8;
+  font-weight: 700;
 }
 
 .checkbox-item {
