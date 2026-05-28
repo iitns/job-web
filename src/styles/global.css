@@ -835,8 +835,7 @@ button {
 .primary-button:hover,
 .secondary-button:hover,
 .icon-button:hover,
-.favorite-button:hover,
-.job-card:hover {
+.favorite-button:hover {
   transform: translateY(-1px);
 }
 
@@ -886,7 +885,6 @@ button {
   border-radius: 20px;
   padding: 18px;
   min-width: 0;
-  cursor: pointer;
 }
 
 .job-card.selected {

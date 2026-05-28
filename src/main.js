@@ -613,7 +613,6 @@ function renderJobCard(job) {
   return `
     <article
       class="job-card ${state.selectedJobId === job.job_id ? 'selected' : ''}"
-      data-job-id="${escapeHtml(job.job_id)}"
     >
       ${renderJobCardHeader(job)}
       <p class="job-summary">${escapeHtml(jobSummary(job))}</p>
@@ -1874,7 +1873,6 @@ function bindEvents() {
   const companyButtons = root.querySelectorAll('[data-company]')
   const skillButtons = root.querySelectorAll('[data-skill]')
   const toggleSkillListButton = root.querySelector('[data-toggle-skill-list]')
-  const jobButtons = root.querySelectorAll('[data-job-id]')
   const jobOpenButtons = root.querySelectorAll('[data-job-open]')
   const favoriteButtons = root.querySelectorAll('[data-favorite-job-id]')
   const closeButtons = root.querySelectorAll('[data-close-drawer]')
@@ -2036,17 +2034,6 @@ function bindEvents() {
       }
       state.page = nextPage
       loadJobs()
-    })
-  })
-
-  jobButtons.forEach((button) => {
-    button.addEventListener('click', (event) => {
-      const jobId = event.currentTarget.dataset.jobId
-      if (!jobId) {
-        return
-      }
-      state.mobileMenuOpen = false
-      loadJobDetail(jobId)
     })
   })
 

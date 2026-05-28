@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 import psycopg2
@@ -78,6 +79,12 @@ RESUME_STATUS_LABELS = {
 }
 
 RUNTIME_STATE_READY = False
+FAVORITES_CACHE_TTL_SECONDS = 300
+FAVORITES_CACHE_RETRY_SECONDS = 60
+FAVORITES_CACHE: dict[str, dict[str, Any]] = {}
+FAVORITES_CACHE_LOADED_AT: datetime | None = None
+FAVORITES_CACHE_FAILED_AT: datetime | None = None
+FAVORITES_CACHE_LOCK = Lock()
 
 
 def get_page_args() -> tuple[int, int]:
@@ -451,6 +458,10 @@ def serialize_resume_profile(row: dict[str, Any] | None, *, include_raw_text: bo
     return profile
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def fetch_favorite_lookup(conn, *, job_ids: list[str] | None = None) -> dict[str, dict[str, Any]]:
     normalized_job_ids = [
         str(job_id or "").strip()
@@ -487,11 +498,90 @@ def fetch_favorite_lookup(conn, *, job_ids: list[str] | None = None) -> dict[str
     }
 
 
+def refresh_favorite_cache(*, force: bool = False, best_effort: bool = False) -> dict[str, dict[str, Any]]:
+    global FAVORITES_CACHE
+    global FAVORITES_CACHE_LOADED_AT
+    global FAVORITES_CACHE_FAILED_AT
+
+    now = utc_now()
+
+    with FAVORITES_CACHE_LOCK:
+        loaded_at = FAVORITES_CACHE_LOADED_AT
+        failed_at = FAVORITES_CACHE_FAILED_AT
+        cache_snapshot = dict(FAVORITES_CACHE)
+
+    cache_is_fresh = (
+        loaded_at is not None
+        and (now - loaded_at).total_seconds() < FAVORITES_CACHE_TTL_SECONDS
+    )
+    retry_blocked = (
+        failed_at is not None
+        and (now - failed_at).total_seconds() < FAVORITES_CACHE_RETRY_SECONDS
+    )
+
+    if not force and cache_is_fresh:
+        return cache_snapshot
+    if not force and retry_blocked:
+        return cache_snapshot
+
+    try:
+        with db_connect() as conn:
+            favorite_lookup = fetch_favorite_lookup(conn)
+    except Exception:
+        if not best_effort:
+            raise
+        logger.warning("Failed to refresh favorites cache; using cached state", exc_info=True)
+        with FAVORITES_CACHE_LOCK:
+            FAVORITES_CACHE_FAILED_AT = now
+            return dict(FAVORITES_CACHE)
+
+    with FAVORITES_CACHE_LOCK:
+        FAVORITES_CACHE = favorite_lookup
+        FAVORITES_CACHE_LOADED_AT = now
+        FAVORITES_CACHE_FAILED_AT = None
+        return dict(FAVORITES_CACHE)
+
+
+def cached_favorite_lookup(*, job_ids: list[str], best_effort: bool = False) -> dict[str, dict[str, Any]]:
+    favorite_lookup = refresh_favorite_cache(best_effort=best_effort)
+    return {
+        job_id: favorite_lookup[job_id]
+        for job_id in job_ids
+        if job_id in favorite_lookup
+    }
+
+
+def set_cached_favorite(*, job_id: str, favorited_at: Any) -> None:
+    global FAVORITES_CACHE_LOADED_AT
+    global FAVORITES_CACHE_FAILED_AT
+
+    favorite = {
+        "job_id": job_id,
+        "favorited_at": favorited_at,
+    }
+
+    with FAVORITES_CACHE_LOCK:
+        FAVORITES_CACHE[job_id] = favorite
+        FAVORITES_CACHE_LOADED_AT = utc_now()
+        FAVORITES_CACHE_FAILED_AT = None
+
+
+def delete_cached_favorite(*, job_id: str) -> None:
+    global FAVORITES_CACHE_LOADED_AT
+    global FAVORITES_CACHE_FAILED_AT
+
+    with FAVORITES_CACHE_LOCK:
+        FAVORITES_CACHE.pop(job_id, None)
+        FAVORITES_CACHE_LOADED_AT = utc_now()
+        FAVORITES_CACHE_FAILED_AT = None
+
+
 def enrich_jobs_with_favorites(
     jobs: list[dict[str, Any]],
     *,
     conn=None,
     best_effort: bool = False,
+    prefer_cache: bool = False,
 ) -> list[dict[str, Any]]:
     if not jobs:
         return jobs
@@ -504,7 +594,12 @@ def enrich_jobs_with_favorites(
         return jobs
 
     try:
-        if conn is None:
+        if prefer_cache:
+            favorite_lookup = cached_favorite_lookup(
+                job_ids=job_ids,
+                best_effort=best_effort,
+            )
+        elif conn is None:
             with db_connect() as favorite_conn:
                 favorite_lookup = fetch_favorite_lookup(favorite_conn, job_ids=job_ids)
         else:
@@ -817,7 +912,7 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
     hits = payload.get("hits", {})
     total = hits.get("total", {}).get("value", 0)
     jobs = [serialize_job(hit.get("_source", {})) for hit in hits.get("hits", [])]
-    jobs = enrich_jobs_with_favorites(jobs, best_effort=True)
+    jobs = enrich_jobs_with_favorites(jobs, best_effort=True, prefer_cache=True)
 
     filter_options = fetch_filter_options_from_elasticsearch(keyword=keyword)
 
@@ -1125,6 +1220,9 @@ def create_job_favorite(*, job_id: str) -> dict[str, Any] | None:
         favorite = fetch_job_favorite(conn, job_id=job_id)
         conn.commit()
 
+    if favorite:
+        set_cached_favorite(job_id=job_id, favorited_at=favorite.get("favorited_at"))
+
     return favorite
 
 
@@ -1138,6 +1236,10 @@ def delete_job_favorite(*, job_id: str) -> bool | None:
 
     if not exists and not deleted:
         return None
+
+    if deleted:
+        delete_cached_favorite(job_id=job_id)
+
     return deleted
 
 
