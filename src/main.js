@@ -96,6 +96,7 @@ const state = {
   searchKeyword: '',
   selectedCompanies: [],
   selectedSkills: [],
+  skillListExpanded: false,
   companies: [],
   skills: [],
   jobs: [],
@@ -817,31 +818,35 @@ async function uploadResume(file) {
 }
 
 function renderCompanyOptions() {
-  const companies = uniqueTextList([...state.selectedCompanies, ...state.companies])
+  const companies = sortOptionsWithSelected([...state.selectedCompanies, ...state.companies], state.selectedCompanies)
 
   if (companies.length === 0) {
     return '<p class="empty-hint">표시할 회사가 아직 없습니다.</p>'
   }
 
-  return companies
-    .map(
-      (company) => `
-        <label class="checkbox-item">
-          <input
-            type="checkbox"
-            data-company="${escapeHtml(company)}"
-            ${state.selectedCompanies.includes(company) ? 'checked' : ''}
-          />
-          <span>${escapeHtml(company)}</span>
-        </label>
-      `,
-    )
-    .join('')
+  return `
+    <div class="toggle-row company-filter-list">
+      ${companies
+        .map(
+          (company) => `
+            <button
+              class="toggle-chip company-filter-chip ${state.selectedCompanies.includes(company) ? 'active' : ''}"
+              type="button"
+              data-company="${escapeHtml(company)}"
+            >
+              ${escapeHtml(company)}
+            </button>
+          `,
+        )
+        .join('')}
+    </div>
+  `
 }
 
 function renderSkillOptions() {
   const skills = sortSkillOptions([...state.selectedSkills, ...state.skills])
   const resumeSkillSet = new Set(state.activeTab === 'recommend' ? resumeSuggestedSkills() : [])
+  const visibleSkills = state.skillListExpanded ? skills : skills.slice(0, 30)
 
   if (skills.length === 0) {
     return '<p class="empty-hint">표시할 스킬이 아직 없습니다.</p>'
@@ -849,7 +854,7 @@ function renderSkillOptions() {
 
   return `
     <div class="toggle-row skill-filter-list">
-      ${skills
+      ${visibleSkills
         .map(
           (skill) => `
             <button
@@ -863,6 +868,15 @@ function renderSkillOptions() {
         )
         .join('')}
     </div>
+    ${
+      skills.length > 30
+        ? `
+          <button class="filter-more-button" type="button" data-toggle-skill-list>
+            ${state.skillListExpanded ? '접기' : `더 보기 (${skills.length - visibleSkills.length}개)`}
+          </button>
+        `
+        : ''
+    }
   `
 }
 
@@ -1304,7 +1318,7 @@ function renderNavigation() {
 }
 
 function renderSearchControls() {
-  const buttonLabel = state.activeTab === 'recommend' ? '추천 검색' : '검색'
+  const skillCount = uniqueTextList([...state.selectedSkills, ...state.skills]).length
 
   return `
     <div class="control-stack">
@@ -1318,30 +1332,17 @@ function renderSearchControls() {
 
       <div class="field">
         <div class="field-row">
-          <span class="field-label">회사</span>
-          <span class="field-meta">${state.companies.length}개</span>
+          <span class="field-label field-label-inline">회사 (${state.companies.length}개)</span>
         </div>
-        <div class="checkbox-list">
-          ${renderCompanyOptions()}
-        </div>
+        ${renderCompanyOptions()}
       </div>
 
       <div class="field">
         <div class="field-row">
-          <span class="field-label">Skill</span>
-          <span class="field-meta">${uniqueTextList([...state.selectedSkills, ...state.skills]).length}개</span>
+          <span class="field-label field-label-inline">Skill (${skillCount}개)</span>
+          <button class="filter-inline-button" type="button" data-reset>초기화</button>
         </div>
         ${renderSkillOptions()}
-      </div>
-
-      <div class="panel-actions">
-        <button class="primary-button" type="button" data-search>${buttonLabel}</button>
-        <button class="secondary-button" type="button" data-reset>초기화</button>
-        ${
-          state.activeTab === 'recommend' && !state.isMobile
-            ? '<button class="secondary-button" type="button" data-tab-jump="manage">이력서 관리</button>'
-            : ''
-        }
       </div>
     </div>
   `
@@ -1364,15 +1365,6 @@ function renderRecommendationControls({ mobile = false } = {}) {
         <div class="resume-placeholder">
           ${mobile ? '추천은 활성 이력서를 등록한 뒤 사용할 수 있습니다.' : '추천을 사용하려면 활성 이력서를 업로드하거나 활성화해 주세요.'}
         </div>
-        ${
-          mobile
-            ? ''
-            : `
-              <div class="panel-actions">
-                <button class="primary-button" type="button" data-tab-jump="manage">이력서 관리로 이동</button>
-              </div>
-            `
-        }
       </div>
     `
   }
@@ -1640,10 +1632,18 @@ function resetSearch() {
   state.searchKeyword = ''
   state.selectedCompanies = []
   state.selectedSkills = []
+  state.skillListExpanded = false
   state.page = 1
   state.selectedJobId = null
   state.selectedJob = null
   state.mobileMenuOpen = false
+  loadJobs()
+}
+
+function applyFilters() {
+  state.page = 1
+  state.selectedJobId = null
+  state.selectedJob = null
   loadJobs()
 }
 
@@ -1693,11 +1693,11 @@ function switchTab(nextTab) {
 
 function bindEvents() {
   const keywordInput = root.querySelector('.text-input')
-  const searchButton = root.querySelector('[data-search]')
   const resetButton = root.querySelector('[data-reset]')
   const pageButtons = root.querySelectorAll('[data-page]')
-  const companyCheckboxes = root.querySelectorAll('input[data-company]')
+  const companyButtons = root.querySelectorAll('[data-company]')
   const skillButtons = root.querySelectorAll('[data-skill]')
+  const toggleSkillListButton = root.querySelector('[data-toggle-skill-list]')
   const jobButtons = root.querySelectorAll('[data-job-id]')
   const closeButtons = root.querySelectorAll('[data-close-drawer]')
   const resumeForm = root.querySelector('[data-resume-form]')
@@ -1720,7 +1720,6 @@ function bindEvents() {
     }
   })
 
-  searchButton?.addEventListener('click', executeSearch)
   resetButton?.addEventListener('click', resetSearch)
 
   resumeRefreshButtons.forEach((button) => {
@@ -1746,8 +1745,13 @@ function bindEvents() {
         state.selectedSkills = [...state.selectedSkills, skill]
       }
 
-      render()
+      applyFilters()
     })
+  })
+
+  toggleSkillListButton?.addEventListener('click', () => {
+    state.skillListExpanded = !state.skillListExpanded
+    render()
   })
 
   resumeSelectButtons.forEach((button) => {
@@ -1798,9 +1802,9 @@ function bindEvents() {
     })
   })
 
-  companyCheckboxes.forEach((checkbox) => {
-    checkbox.addEventListener('change', (event) => {
-      const company = event.target.dataset.company
+  companyButtons.forEach((button) => {
+    button.addEventListener('click', (event) => {
+      const company = event.currentTarget.dataset.company
       if (!company) {
         return
       }
@@ -1810,6 +1814,8 @@ function bindEvents() {
       } else {
         state.selectedCompanies = [...state.selectedCompanies, company]
       }
+
+      applyFilters()
     })
   })
 
