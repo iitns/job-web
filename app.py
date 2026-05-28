@@ -491,6 +491,7 @@ def enrich_jobs_with_favorites(
     jobs: list[dict[str, Any]],
     *,
     conn=None,
+    best_effort: bool = False,
 ) -> list[dict[str, Any]]:
     if not jobs:
         return jobs
@@ -502,11 +503,17 @@ def enrich_jobs_with_favorites(
             job["favorited_at"] = None
         return jobs
 
-    if conn is None:
-        with db_connect() as favorite_conn:
-            favorite_lookup = fetch_favorite_lookup(favorite_conn, job_ids=job_ids)
-    else:
-        favorite_lookup = fetch_favorite_lookup(conn, job_ids=job_ids)
+    try:
+        if conn is None:
+            with db_connect() as favorite_conn:
+                favorite_lookup = fetch_favorite_lookup(favorite_conn, job_ids=job_ids)
+        else:
+            favorite_lookup = fetch_favorite_lookup(conn, job_ids=job_ids)
+    except Exception:
+        if not best_effort:
+            raise
+        logger.warning("Failed to enrich jobs with favorites; defaulting to unfavorited state", exc_info=True)
+        favorite_lookup = {}
 
     for job in jobs:
         job_id = str(job.get("job_id") or "").strip()
@@ -810,7 +817,7 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
     hits = payload.get("hits", {})
     total = hits.get("total", {}).get("value", 0)
     jobs = [serialize_job(hit.get("_source", {})) for hit in hits.get("hits", [])]
-    jobs = enrich_jobs_with_favorites(jobs)
+    jobs = enrich_jobs_with_favorites(jobs, best_effort=True)
 
     filter_options = fetch_filter_options_from_elasticsearch(keyword=keyword)
 

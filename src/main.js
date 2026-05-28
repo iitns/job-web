@@ -1,5 +1,5 @@
 const MOBILE_VIEWPORT_QUERY = window.matchMedia('(max-width: 980px)')
-const PERSISTED_ACTIVE_TAB = window.localStorage.getItem('job-web:active-tab') || 'recommend'
+const ACTIVE_TAB_STORAGE_KEY = 'job-web:active-tab'
 
 const TAB_LABELS = {
   search: '목록',
@@ -92,8 +92,22 @@ function normalizeTab(tab, isMobile = MOBILE_VIEWPORT_QUERY.matches) {
   return availableTabs(isMobile).includes(tab) ? tab : 'recommend'
 }
 
+function readStoredActiveTab() {
+  try {
+    return window.localStorage.getItem(ACTIVE_TAB_STORAGE_KEY) || 'recommend'
+  } catch {
+    return 'recommend'
+  }
+}
+
+function persistActiveTab(tab) {
+  try {
+    window.localStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tab)
+  } catch {}
+}
+
 const state = {
-  activeTab: normalizeTab(PERSISTED_ACTIVE_TAB),
+  activeTab: normalizeTab(readStoredActiveTab()),
   draftKeyword: '',
   searchKeyword: '',
   selectedCompanies: [],
@@ -135,7 +149,7 @@ const state = {
   mobileMenuOpen: false,
 }
 
-window.localStorage.setItem('job-web:active-tab', state.activeTab)
+persistActiveTab(state.activeTab)
 
 const root = document.querySelector('#root')
 
@@ -582,14 +596,24 @@ function favoriteEmptyMessage() {
     : '아직 즐겨찾기한 공고가 없습니다. 목록, 추천, 상세 화면의 별표로 저장해 보세요.'
 }
 
+function renderJobOpenButton(job) {
+  return `
+    <button
+      class="secondary-button compact-button job-open-button"
+      type="button"
+      data-job-open="${escapeHtml(job.job_id)}"
+      aria-label="${escapeHtml(`${job.title} 상세 보기`)}"
+    >
+      상세 보기
+    </button>
+  `
+}
+
 function renderJobCard(job) {
   return `
     <article
       class="job-card ${state.selectedJobId === job.job_id ? 'selected' : ''}"
-      role="button"
-      tabindex="0"
       data-job-id="${escapeHtml(job.job_id)}"
-      aria-label="${escapeHtml(`${job.title} 상세 보기`)}"
     >
       ${renderJobCardHeader(job)}
       <p class="job-summary">${escapeHtml(jobSummary(job))}</p>
@@ -609,6 +633,9 @@ function renderJobCard(job) {
         <div class="inline-chip-list">
           ${renderInlineChips(job.matched_domains?.length ? job.matched_domains : job.domains, '도메인 없음')}
         </div>
+      </div>
+      <div class="job-card-actions">
+        ${renderJobOpenButton(job)}
       </div>
     </article>
   `
@@ -1802,7 +1829,7 @@ async function openResumeInManage(resumeId) {
   state.error = ''
   state.favoriteError = ''
   state.mobileMenuOpen = false
-  window.localStorage.setItem('job-web:active-tab', 'manage')
+  persistActiveTab('manage')
 
   render()
 
@@ -1828,7 +1855,7 @@ function switchTab(nextTab) {
   state.error = ''
   state.favoriteError = ''
   state.mobileMenuOpen = false
-  window.localStorage.setItem('job-web:active-tab', normalizedTab)
+  persistActiveTab(normalizedTab)
 
   render()
 
@@ -1848,6 +1875,7 @@ function bindEvents() {
   const skillButtons = root.querySelectorAll('[data-skill]')
   const toggleSkillListButton = root.querySelector('[data-toggle-skill-list]')
   const jobButtons = root.querySelectorAll('[data-job-id]')
+  const jobOpenButtons = root.querySelectorAll('[data-job-open]')
   const favoriteButtons = root.querySelectorAll('[data-favorite-job-id]')
   const closeButtons = root.querySelectorAll('[data-close-drawer]')
   const resumeForm = root.querySelector('[data-resume-form]')
@@ -1984,6 +2012,20 @@ function bindEvents() {
     })
   })
 
+  jobOpenButtons.forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation()
+
+      const jobId = event.currentTarget.dataset.jobOpen
+      if (!jobId) {
+        return
+      }
+
+      state.mobileMenuOpen = false
+      loadJobDetail(jobId)
+    })
+  })
+
   pageButtons.forEach((button) => {
     button.addEventListener('click', (event) => {
       const direction = event.target.dataset.page
@@ -2003,21 +2045,6 @@ function bindEvents() {
       if (!jobId) {
         return
       }
-      state.mobileMenuOpen = false
-      loadJobDetail(jobId)
-    })
-
-    button.addEventListener('keydown', (event) => {
-      if (event.key !== 'Enter' && event.key !== ' ') {
-        return
-      }
-
-      event.preventDefault()
-      const jobId = event.currentTarget.dataset.jobId
-      if (!jobId) {
-        return
-      }
-
       state.mobileMenuOpen = false
       loadJobDetail(jobId)
     })
@@ -2075,7 +2102,7 @@ function syncViewportState(isMobile) {
 
   if (tabChanged) {
     state.activeTab = nextTab
-    window.localStorage.setItem('job-web:active-tab', nextTab)
+    persistActiveTab(nextTab)
   }
 
   return tabChanged

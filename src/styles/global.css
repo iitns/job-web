@@ -894,11 +894,6 @@ button {
   box-shadow: 0 12px 30px rgba(28, 108, 75, 0.12);
 }
 
-.job-card:focus-visible {
-  outline: 2px solid rgba(28, 108, 75, 0.42);
-  outline-offset: 3px;
-}
-
 .job-card-topline {
   display: flex;
   align-items: center;
@@ -1053,6 +1048,17 @@ button {
   grid-template-columns: 64px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
+}
+
+.job-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.job-open-button {
+  position: relative;
+  z-index: 1;
 }
 
 .job-chip-label {
