@@ -112,9 +112,11 @@ const state = {
   searchKeyword: '',
   selectedCompanies: [],
   selectedSkills: [],
+  selectedLocations: [],
   skillListExpanded: false,
   companies: [],
   skills: [],
+  locations: [],
   jobs: [],
   total: 0,
   page: 1,
@@ -588,7 +590,8 @@ function favoriteEmptyMessage() {
   const hasActiveFilters = Boolean(
     state.searchKeyword.trim() ||
     state.selectedCompanies.length ||
-    state.selectedSkills.length,
+    state.selectedSkills.length ||
+    state.selectedLocations.length,
   )
 
   return hasActiveFilters
@@ -650,6 +653,9 @@ function buildQuery({ includeKeyword = false } = {}) {
   })
   state.selectedSkills.forEach((skill) => {
     params.append('skill', skill)
+  })
+  state.selectedLocations.forEach((location) => {
+    params.append('location', location)
   })
 
   if (includeKeyword && state.searchKeyword.trim()) {
@@ -926,6 +932,7 @@ async function loadJobs() {
     state.pageSize = payload.page_size || state.pageSize
     state.companies = payload.companies || []
     state.skills = payload.skills || []
+    state.locations = payload.locations || []
     state.source = payload.source || 'postgres'
     state.searchReady = payload.search_ready !== false
 
@@ -996,6 +1003,32 @@ async function uploadResume(file) {
     state.resumeUploading = false
     render()
   }
+}
+
+function renderLocationOptions() {
+  const locations = sortOptionsWithSelected([...state.selectedLocations, ...state.locations], state.selectedLocations)
+
+  if (locations.length === 0) {
+    return '<p class="empty-hint">표시할 위치가 아직 없습니다.</p>'
+  }
+
+  return `
+    <div class="toggle-row location-filter-list">
+      ${locations
+        .map(
+          (location) => `
+            <button
+              class="toggle-chip location-filter-chip ${state.selectedLocations.includes(location) ? 'active' : ''}"
+              type="button"
+              data-location="${escapeHtml(location)}"
+            >
+              ${escapeHtml(location)}
+            </button>
+          `,
+        )
+        .join('')}
+    </div>
+  `
 }
 
 function renderCompanyOptions() {
@@ -1474,6 +1507,7 @@ function renderNavigation() {
 
 function renderSearchControls() {
   const skillCount = uniqueTextList([...state.selectedSkills, ...state.skills]).length
+  const locationCount = uniqueTextList([...state.selectedLocations, ...state.locations]).length
 
   return `
     <div class="control-stack">
@@ -1490,6 +1524,13 @@ function renderSearchControls() {
           <span class="field-label field-label-inline">회사 (${state.companies.length}개)</span>
         </div>
         ${renderCompanyOptions()}
+      </div>
+
+      <div class="field">
+        <div class="field-row">
+          <span class="field-label field-label-inline">위치 (${locationCount}개)</span>
+        </div>
+        ${renderLocationOptions()}
       </div>
 
       <div class="field">
@@ -1803,6 +1844,7 @@ function resetSearch() {
   state.searchKeyword = ''
   state.selectedCompanies = []
   state.selectedSkills = []
+  state.selectedLocations = []
   state.skillListExpanded = false
   state.page = 1
   state.selectedJobId = null
@@ -1872,6 +1914,7 @@ function bindEvents() {
   const pageButtons = root.querySelectorAll('[data-page]')
   const companyButtons = root.querySelectorAll('[data-company]')
   const skillButtons = root.querySelectorAll('[data-skill]')
+  const locationButtons = root.querySelectorAll('[data-location]')
   const toggleSkillListButton = root.querySelector('[data-toggle-skill-list]')
   const jobOpenButtons = root.querySelectorAll('[data-job-open]')
   const favoriteButtons = root.querySelectorAll('[data-favorite-job-id]')
@@ -1989,6 +2032,23 @@ function bindEvents() {
         state.selectedCompanies = state.selectedCompanies.filter((item) => item !== company)
       } else {
         state.selectedCompanies = [...state.selectedCompanies, company]
+      }
+
+      applyFilters()
+    })
+  })
+
+  locationButtons.forEach((button) => {
+    button.addEventListener('click', (event) => {
+      const location = event.currentTarget.dataset.location
+      if (!location) {
+        return
+      }
+
+      if (state.selectedLocations.includes(location)) {
+        state.selectedLocations = state.selectedLocations.filter((item) => item !== location)
+      } else {
+        state.selectedLocations = [...state.selectedLocations, location]
       }
 
       applyFilters()

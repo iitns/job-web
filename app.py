@@ -109,6 +109,14 @@ def get_skills_arg() -> list[str]:
     return [value.strip() for value in raw if value and value.strip()]
 
 
+def get_locations_arg() -> list[str]:
+    raw = request.args.getlist("location")
+    if not raw:
+        csv_value = request.args.get("locations", "")
+        raw = csv_value.split(",") if csv_value else []
+    return [value.strip() for value in raw if value and value.strip()]
+
+
 def db_connect():
     return psycopg2.connect(**PG_CONFIG)
 
@@ -143,6 +151,17 @@ def company_mark(company: str | None) -> str:
     if len(words) == 1:
         return words[0][:2].upper()
     return f"{words[0][0]}{words[1][0]}".upper()
+
+
+def extract_location_cities(locations: Any) -> set[str]:
+    cities: set[str] = set()
+    for loc in normalize_string_list(locations):
+        if loc.strip().lower() == "remote":
+            continue
+        parts = [p.strip() for p in loc.split(",")]
+        if parts and parts[0]:
+            cities.add(parts[0])
+    return cities
 
 
 def normalize_string_list(items: Any) -> list[str]:
@@ -619,7 +638,7 @@ def enrich_jobs_with_favorites(
     return jobs
 
 
-def fetch_filter_options_from_postgres(conn, *, allowed_job_ids: list[str] | None = None) -> tuple[list[str], list[str]]:
+def fetch_filter_options_from_postgres(conn, *, allowed_job_ids: list[str] | None = None) -> tuple[list[str], list[str], list[str]]:
     filters = ["is_active = TRUE"]
     params: list[Any] = []
 
@@ -628,7 +647,7 @@ def fetch_filter_options_from_postgres(conn, *, allowed_job_ids: list[str] | Non
             filters.append("job_id = ANY(%s)")
             params.append(allowed_job_ids)
         else:
-            return [], []
+            return [], [], []
 
     where_clause = " AND ".join(filters)
 
@@ -659,7 +678,23 @@ def fetch_filter_options_from_postgres(conn, *, allowed_job_ids: list[str] | Non
         )
         skills = [row[0] for row in cur.fetchall() if row[0]]
 
-    return companies, skills
+        cur.execute(
+            f"""
+            SELECT DISTINCT BTRIM(SPLIT_PART(BTRIM(loc), ',', 1)) AS city
+            FROM (
+                SELECT UNNEST(COALESCE(locations, ARRAY[]::TEXT[])) AS loc
+                FROM jobs
+                WHERE {where_clause}
+            ) locs
+            WHERE BTRIM(loc) NOT ILIKE 'remote'
+              AND BTRIM(SPLIT_PART(BTRIM(loc), ',', 1)) <> ''
+            ORDER BY city ASC
+            """,
+            params,
+        )
+        locations = [row[0] for row in cur.fetchall() if row[0]]
+
+    return companies, skills, locations
 
 
 def fetch_filter_options_from_elasticsearch(
@@ -715,6 +750,13 @@ def fetch_filter_options_from_elasticsearch(
                     "order": {"_key": "asc"},
                 }
             },
+            "locations": {
+                "terms": {
+                    "field": "location_cities",
+                    "size": 1000,
+                    "order": {"_key": "asc"},
+                }
+            },
         },
     }
 
@@ -727,10 +769,11 @@ def fetch_filter_options_from_elasticsearch(
     if response.status_code == 404:
         logger.warning("Elasticsearch index %s not found while loading filters", ES_INDEX)
         with db_connect() as conn:
-            companies, skills = fetch_filter_options_from_postgres(conn, allowed_job_ids=allowed_job_ids)
+            companies, skills, locations = fetch_filter_options_from_postgres(conn, allowed_job_ids=allowed_job_ids)
         return {
             "companies": companies,
             "skills": skills,
+            "locations": locations,
             "search_ready": False,
         }
 
@@ -748,15 +791,21 @@ def fetch_filter_options_from_elasticsearch(
         for bucket in aggregations.get("skills", {}).get("buckets", [])
         if bucket.get("key")
     ]
+    locations = [
+        bucket.get("key")
+        for bucket in aggregations.get("locations", {}).get("buckets", [])
+        if bucket.get("key")
+    ]
 
     return {
         "companies": companies,
         "skills": skills,
+        "locations": locations,
         "search_ready": True,
     }
 
 
-def fetch_jobs_from_postgres(*, page: int, page_size: int, companies: list[str], skills: list[str]) -> dict[str, Any]:
+def fetch_jobs_from_postgres(*, page: int, page_size: int, companies: list[str], skills: list[str], locations: list[str]) -> dict[str, Any]:
     filters = ["is_active = TRUE"]
     params: list[Any] = []
 
@@ -766,6 +815,16 @@ def fetch_jobs_from_postgres(*, page: int, page_size: int, companies: list[str],
     if skills:
         filters.append("COALESCE(skills, ARRAY[]::TEXT[]) && %s::TEXT[]")
         params.append(skills)
+    if locations:
+        filters.append(
+            """
+            EXISTS (
+                SELECT 1 FROM UNNEST(COALESCE(locations, ARRAY[]::TEXT[])) AS loc
+                WHERE BTRIM(SPLIT_PART(BTRIM(loc), ',', 1)) = ANY(%s)
+            )
+            """
+        )
+        params.append(locations)
 
     where_clause = " AND ".join(filters)
     offset = (page - 1) * page_size
@@ -817,12 +876,13 @@ def fetch_jobs_from_postgres(*, page: int, page_size: int, companies: list[str],
         "page_size": page_size,
         "companies": filter_options["companies"],
         "skills": filter_options["skills"],
+        "locations": filter_options["locations"],
         "source": "postgres",
         "search_ready": True,
     }
 
 
-def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, companies: list[str], skills: list[str]) -> dict[str, Any]:
+def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, companies: list[str], skills: list[str], locations: list[str]) -> dict[str, Any]:
     from_offset = (page - 1) * page_size
     query: dict[str, Any] = {
         "from": from_offset,
@@ -886,6 +946,8 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
         query["query"]["bool"]["filter"].append({"terms": {"company": companies}})
     if skills:
         query["query"]["bool"]["filter"].append({"terms": {"skills": skills}})
+    if locations:
+        query["query"]["bool"]["filter"].append({"terms": {"location_cities": locations}})
 
     response = requests.post(
         f"{ES_HOST}/{ES_INDEX}/_search",
@@ -903,6 +965,7 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
             "page_size": page_size,
             "companies": filter_options["companies"],
             "skills": filter_options["skills"],
+            "locations": filter_options["locations"],
             "source": "elasticsearch",
             "search_ready": False,
         }
@@ -923,6 +986,7 @@ def search_jobs_in_elasticsearch(*, keyword: str, page: int, page_size: int, com
         "page_size": page_size,
         "companies": filter_options["companies"],
         "skills": filter_options["skills"],
+        "locations": filter_options["locations"],
         "source": "elasticsearch",
         "search_ready": filter_options["search_ready"],
     }
@@ -1050,7 +1114,7 @@ def fetch_recommendation_job_ids(conn, *, resume_id: int) -> list[str]:
         return [row[0] for row in cur.fetchall() if row[0]]
 
 
-def fetch_favorite_filter_options_from_postgres(conn) -> tuple[list[str], list[str]]:
+def fetch_favorite_filter_options_from_postgres(conn) -> tuple[list[str], list[str], list[str]]:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1077,7 +1141,22 @@ def fetch_favorite_filter_options_from_postgres(conn) -> tuple[list[str], list[s
         )
         skills = [row[0] for row in cur.fetchall() if row[0]]
 
-    return companies, skills
+        cur.execute(
+            """
+            SELECT DISTINCT BTRIM(SPLIT_PART(BTRIM(loc), ',', 1)) AS city
+            FROM (
+                SELECT UNNEST(COALESCE(j.locations, ARRAY[]::TEXT[])) AS loc
+                FROM job_favorites f
+                JOIN jobs j USING (job_id)
+            ) locs
+            WHERE BTRIM(loc) NOT ILIKE 'remote'
+              AND BTRIM(SPLIT_PART(BTRIM(loc), ',', 1)) <> ''
+            ORDER BY city ASC
+            """
+        )
+        locations = [row[0] for row in cur.fetchall() if row[0]]
+
+    return companies, skills, locations
 
 
 def fetch_favorite_jobs_from_postgres(
@@ -1086,6 +1165,7 @@ def fetch_favorite_jobs_from_postgres(
     page_size: int,
     companies: list[str],
     skills: list[str],
+    locations: list[str],
     keyword: str,
 ) -> dict[str, Any]:
     filters = ["TRUE"]
@@ -1097,6 +1177,16 @@ def fetch_favorite_jobs_from_postgres(
     if skills:
         filters.append("COALESCE(j.skills, ARRAY[]::TEXT[]) && %s::TEXT[]")
         params.append(skills)
+    if locations:
+        filters.append(
+            """
+            EXISTS (
+                SELECT 1 FROM UNNEST(COALESCE(j.locations, ARRAY[]::TEXT[])) AS loc
+                WHERE BTRIM(SPLIT_PART(BTRIM(loc), ',', 1)) = ANY(%s)
+            )
+            """
+        )
+        params.append(locations)
     if keyword:
         like_keyword = f"%{keyword}%"
         filters.append(
@@ -1112,16 +1202,17 @@ def fetch_favorite_jobs_from_postgres(
                 OR COALESCE(j.preferred_qualifications, '') ILIKE %s
                 OR COALESCE(array_to_string(j.skills, ' '), '') ILIKE %s
                 OR COALESCE(array_to_string(j.domains, ' '), '') ILIKE %s
+                OR COALESCE(array_to_string(j.locations, ' '), '') ILIKE %s
             )
             """
         )
-        params.extend([like_keyword] * 10)
+        params.extend([like_keyword] * 11)
 
     where_clause = " AND ".join(filters)
     offset = (page - 1) * page_size
 
     with db_connect() as conn:
-        favorite_companies, favorite_skills = fetch_favorite_filter_options_from_postgres(conn)
+        favorite_companies, favorite_skills, favorite_locations = fetch_favorite_filter_options_from_postgres(conn)
 
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -1178,6 +1269,7 @@ def fetch_favorite_jobs_from_postgres(
         "page_size": page_size,
         "companies": favorite_companies,
         "skills": favorite_skills,
+        "locations": favorite_locations,
         "source": "favorites",
         "search_ready": True,
     }
@@ -1413,7 +1505,7 @@ def score_recommendation_candidates(
     return scored_jobs
 
 
-def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str], skills: list[str], keyword: str) -> dict[str, Any]:
+def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str], skills: list[str], locations: list[str], keyword: str) -> dict[str, Any]:
     offset = (page - 1) * page_size
 
     with db_connect() as conn:
@@ -1466,6 +1558,7 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
                     "page_size": page_size,
                     "companies": filter_options["companies"],
                     "skills": filter_options["skills"],
+                    "locations": filter_options["locations"],
                     "source": "recommendation",
                     "resume": None,
                     "profile": None,
@@ -1484,6 +1577,7 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
                     "page_size": page_size,
                     "companies": filter_options["companies"],
                     "skills": filter_options["skills"],
+                    "locations": filter_options["locations"],
                     "source": "recommendation",
                     "resume": serialize_resume(resume_dict),
                     "profile": serialize_resume_profile(resume_dict),
@@ -1520,6 +1614,14 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
                     },
                     key=lambda value: str(value).casefold(),
                 )
+                locations_all = sorted(
+                    {
+                        city
+                        for job in ranked_jobs
+                        for city in extract_location_cities(job.get("locations"))
+                    },
+                    key=lambda value: str(value).casefold(),
+                )
 
                 filtered_jobs = ranked_jobs
                 if companies:
@@ -1531,6 +1633,12 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
                         job
                         for job in filtered_jobs
                         if set(normalize_string_list(job.get("skills"))) & set(skills)
+                    ]
+                if locations:
+                    filtered_jobs = [
+                        job
+                        for job in filtered_jobs
+                        if extract_location_cities(job.get("locations")) & set(locations)
                     ]
 
                 total = len(filtered_jobs)
@@ -1547,6 +1655,7 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
                     "page_size": page_size,
                     "companies": companies_all,
                     "skills": skills_all,
+                    "locations": locations_all,
                     "source": "recommendation-hybrid",
                     "resume": serialize_resume(resume_dict),
                     "profile": serialize_resume_profile(resume_dict),
@@ -1571,6 +1680,16 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
             if skills:
                 filters.append("COALESCE(j.skills, ARRAY[]::TEXT[]) && %s::TEXT[]")
                 params.append(skills)
+            if locations:
+                filters.append(
+                    """
+                    EXISTS (
+                        SELECT 1 FROM UNNEST(COALESCE(j.locations, ARRAY[]::TEXT[])) AS loc
+                        WHERE BTRIM(SPLIT_PART(BTRIM(loc), ',', 1)) = ANY(%s)
+                    )
+                    """
+                )
+                params.append(locations)
 
             where_clause = " AND ".join(filters)
 
@@ -1628,6 +1747,7 @@ def recommend_jobs_from_resume(*, page: int, page_size: int, companies: list[str
         "page_size": page_size,
         "companies": filter_options["companies"],
         "skills": filter_options["skills"],
+        "locations": filter_options["locations"],
         "source": "recommendation",
         "resume": serialize_resume(resume_dict),
         "profile": serialize_resume_profile(resume_dict),
@@ -1852,9 +1972,10 @@ def list_jobs():
     page, page_size = get_page_args()
     companies = get_companies_arg()
     skills = get_skills_arg()
+    locations = get_locations_arg()
 
     try:
-        return jsonify(fetch_jobs_from_postgres(page=page, page_size=page_size, companies=companies, skills=skills))
+        return jsonify(fetch_jobs_from_postgres(page=page, page_size=page_size, companies=companies, skills=skills, locations=locations))
     except Exception as exc:
         logger.exception("Failed to load jobs from PostgreSQL")
         return jsonify({"error": "failed_to_load_jobs", "message": str(exc)}), 500
@@ -1867,9 +1988,10 @@ def search_jobs():
     page, page_size = get_page_args()
     companies = get_companies_arg()
     skills = get_skills_arg()
+    locations = get_locations_arg()
 
     if not keyword:
-        return jsonify(fetch_jobs_from_postgres(page=page, page_size=page_size, companies=companies, skills=skills))
+        return jsonify(fetch_jobs_from_postgres(page=page, page_size=page_size, companies=companies, skills=skills, locations=locations))
 
     try:
         return jsonify(
@@ -1879,6 +2001,7 @@ def search_jobs():
                 page_size=page_size,
                 companies=companies,
                 skills=skills,
+                locations=locations,
             )
         )
     except Exception as exc:
@@ -1892,6 +2015,7 @@ def recommend_jobs():
     page, page_size = get_page_args()
     companies = get_companies_arg()
     skills = get_skills_arg()
+    locations = get_locations_arg()
     keyword = request.args.get("q", "").strip()
 
     try:
@@ -1901,6 +2025,7 @@ def recommend_jobs():
                 page_size=page_size,
                 companies=companies,
                 skills=skills,
+                locations=locations,
                 keyword=keyword,
             )
         )
@@ -1915,6 +2040,7 @@ def list_favorite_jobs():
     page, page_size = get_page_args()
     companies = get_companies_arg()
     skills = get_skills_arg()
+    locations = get_locations_arg()
     keyword = request.args.get("q", "").strip()
 
     try:
@@ -1924,6 +2050,7 @@ def list_favorite_jobs():
                 page_size=page_size,
                 companies=companies,
                 skills=skills,
+                locations=locations,
                 keyword=keyword,
             )
         )
